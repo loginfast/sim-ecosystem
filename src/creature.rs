@@ -1,0 +1,168 @@
+use std::f32::consts::SQRT_2;
+
+use bevy::prelude::*;
+
+use crate::GRID_SIZE;
+use crate::iso::{TILE_H, TILE_W, world_to_screen};
+use crate::sim::SimParams;
+
+#[derive(Component)]
+pub struct Creature;
+
+#[derive(Component)]
+pub struct GridPos(pub IVec2);
+
+#[derive(Component)]
+pub struct WorldPos(pub Vec2);
+
+#[derive(Component, Default)]
+pub struct Facing(pub Option<IVec2>);
+
+#[derive(Component)]
+pub struct Genes {
+    pub speed: f32,
+}
+
+#[derive(Component)]
+pub struct Stats {
+    pub energy: f32,
+}
+
+pub struct CreaturePlugin;
+
+impl Plugin for CreaturePlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<SimParams>()
+            .add_systems(Startup, spawn)
+            .add_systems(Update, (update, facing))
+            .add_systems(FixedUpdate, (start_step, advance, metabolize, die).chain());
+    }
+}
+
+fn facing(keys: Res<ButtonInput<KeyCode>>, mut q: Query<&mut Facing, With<Creature>>) {
+    let dir = if keys.pressed(KeyCode::ArrowUp) {
+        Some(IVec2::new(-1, 0))
+    } else if keys.pressed(KeyCode::ArrowRight) {
+        Some(IVec2::new(0, -1))
+    } else if keys.pressed(KeyCode::ArrowDown) {
+        Some(IVec2::new(1, 0))
+    } else if keys.pressed(KeyCode::ArrowLeft) {
+        Some(IVec2::new(0, 1))
+    } else {
+        None
+    };
+    for mut f in &mut q {
+        f.0 = dir;
+    }
+}
+
+fn advance(time: Res<Time>, mut q: Query<(&mut WorldPos, &GridPos, &Genes), With<Creature>>) {
+    for (mut pos, grid, gene) in &mut q {
+        let to = grid.0.as_vec2() - pos.0;
+        let dist = to.length();
+        let step = gene.speed * time.delta_secs();
+        pos.0 = if dist <= step {
+            grid.0.as_vec2()
+        } else {
+            pos.0 + to / dist * step
+        };
+    }
+}
+
+fn start_step(mut q: Query<(&mut GridPos, &WorldPos, &Facing), With<Creature>>) {
+    for (mut grid, pos, intent) in &mut q {
+        if pos.0.distance(grid.0.as_vec2()) > 1e-4 {
+            continue;
+        }
+        let Some(dir) = intent.0 else { continue };
+        let next = grid.0 + dir;
+        if next.cmpge(IVec2::ZERO).all() && next.cmplt(IVec2::splat(GRID_SIZE)).all() {
+            grid.0 = next;
+        }
+    }
+}
+
+fn update(mut q: Query<(&WorldPos, &mut Transform), With<Creature>>) {
+    /* Introduce z-ordering for isometric projection */
+    const DEPTH_EPS: f32 = 0.001;
+
+    for (pos, mut t) in &mut q {
+        let s = world_to_screen(pos.0.x, pos.0.y);
+        t.translation = Vec3::new(s.x, s.y, 1.0 + (pos.0.x + pos.0.y) * DEPTH_EPS);
+    }
+}
+
+fn metabolize(
+    time: Res<Time>,
+    params: Res<SimParams>,
+    mut q: Query<(&Genes, &mut Stats, &WorldPos, &GridPos), With<Creature>>,
+) {
+    for (genes, mut stats, pos, gpos) in &mut q {
+        /* FIXME: better way to sort out moving?
+         * the current system just checks whether the sprite is very close to
+         * the tile center and accepts that as stationary. This could be a bug */
+
+        let moving = pos.0.distance(gpos.0.as_vec2()) > 1e-4;
+
+        let moving = if moving { 1.0 } else { 0.0 };
+
+        /* TODO: possibly a better abstraction for calculating cost of particular
+         * characterestics / stats? */
+
+        let cost = params.base_cost + params.movement_cost * genes.speed * moving;
+
+        stats.energy -= (time.delta_secs() * cost).max(0.0);
+    }
+}
+
+fn die(mut commands: Commands, q: Query<(Entity, &Stats), With<Creature>>) {
+    /* TODO: corpses */
+
+    for (entity, Stats { energy }) in &q {
+        if *energy <= 0.0 {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+fn spawn(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    const SHADOW_RADIUS: f32 = 0.4;
+
+    /* TODO: color
+     * TODO: default position */
+
+    let shadow_mesh = meshes.add(Ellipse::new(
+        SHADOW_RADIUS * TILE_W / SQRT_2,
+        SHADOW_RADIUS * TILE_H / SQRT_2,
+    ));
+    let shadow_mat = materials.add(Color::srgba(0.0, 0.0, 0.0, 0.3));
+
+    commands
+        .spawn((
+            Creature,
+            WorldPos(Vec2::new(10.0, 10.0)),
+            GridPos(IVec2::new(10, 10)),
+            Facing::default(),
+            Genes { speed: 4.0 },
+            Stats { energy: 100.0 },
+            Transform::default(),
+            Visibility::default(),
+        ))
+        .with_children(|c| {
+            /* shadow first, sprite over that*/
+            c.spawn((
+                Mesh2d(shadow_mesh),
+                MeshMaterial2d(shadow_mat),
+                Transform::from_xyz(0.0, 0.0, -0.5),
+            ));
+
+            c.spawn((
+                Sprite::from_color(Color::srgb(0.2, 0.7, 0.5), Vec2::new(16.0, 24.0)),
+                Transform::from_xyz(0.0, 12.0, 0.0),
+            ));
+        });
+}
