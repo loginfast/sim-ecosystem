@@ -3,6 +3,7 @@ use std::f32::consts::SQRT_2;
 use bevy::prelude::*;
 
 use crate::GRID_SIZE;
+use crate::food::{Food, FoodKind};
 use crate::iso::{TILE_H, TILE_W, world_to_screen};
 use crate::sim::SimParams;
 
@@ -82,7 +83,10 @@ fn start_step(mut q: Query<(&mut GridPos, &WorldPos, &Facing), With<Creature>>) 
     }
 }
 
-fn update(mut q: Query<(&WorldPos, &mut Transform), With<Creature>>) {
+/* TODO: update is just a general drawing function at this point,
+ *       maybe abstract this to it's own render module?
+ * FIXME: introduce an explicit Z-Ordering for shadows, food, creatures, etc. */
+fn update(mut q: Query<(&WorldPos, &mut Transform), Or<(With<Creature>, With<Food>)>>) {
     /* Introduce z-ordering for isometric projection */
     const DEPTH_EPS: f32 = 0.001;
 
@@ -115,11 +119,15 @@ fn metabolize(
     }
 }
 
-fn die(mut commands: Commands, q: Query<(Entity, &Stats), With<Creature>>) {
-    /* TODO: corpses */
-
-    for (entity, Stats { energy }) in &q {
+fn die(mut commands: Commands, q: Query<(Entity, &Genes, &WorldPos, &Stats), With<Creature>>) {
+    for (entity, _, pos, Stats { energy }) in &q {
         if *energy <= 0.0 {
+            commands.spawn(Food::bundle(
+                pos.0,
+                FoodKind::Carcass,
+                20.0, /* TODO: food quality proportional to size gene and energy */
+            ));
+
             commands.entity(entity).despawn();
         }
     }
@@ -132,7 +140,7 @@ fn spawn(
 ) {
     const SHADOW_RADIUS: f32 = 0.4;
 
-    /* TODO: color
+    /* TODO: procedural color
      * TODO: default position */
 
     let shadow_mesh = meshes.add(Ellipse::new(
@@ -157,12 +165,12 @@ fn spawn(
             c.spawn((
                 Mesh2d(shadow_mesh),
                 MeshMaterial2d(shadow_mat),
-                Transform::from_xyz(0.0, 0.0, -0.5),
+                Transform::from_xyz(0.0, 0.0, 0.0),
             ));
 
             c.spawn((
                 Sprite::from_color(Color::srgb(0.2, 0.7, 0.5), Vec2::new(16.0, 24.0)),
-                Transform::from_xyz(0.0, 12.0, 0.0),
+                Transform::from_xyz(0.0, 12.0, 0.5),
             ));
         });
 }

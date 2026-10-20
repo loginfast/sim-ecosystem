@@ -1,5 +1,6 @@
 mod camera;
 mod creature;
+mod food;
 mod iso;
 mod sim;
 mod ui;
