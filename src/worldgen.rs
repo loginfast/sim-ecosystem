@@ -42,7 +42,12 @@ pub enum Biome {
 }
 
 impl Biome {
-    const ALL: [Biome; 4] = [Biome::Snowy, Biome::Desert, Biome::Rainforest, Biome::Grassland];
+    const ALL: [Biome; 4] = [
+        Biome::Snowy,
+        Biome::Desert,
+        Biome::Rainforest,
+        Biome::Grassland,
+    ];
 
     fn index(self) -> usize {
         match self {
@@ -163,7 +168,10 @@ fn find_regions(tiles: &[Tile]) -> Vec<Region> {
             continue;
         }
         let biome = tiles[start].biome;
-        let mut region = Region { tiles: vec![start], border: [0; 4] };
+        let mut region = Region {
+            tiles: vec![start],
+            border: [0; 4],
+        };
         visited[start] = true;
 
         let mut i = 0;
