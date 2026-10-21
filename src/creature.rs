@@ -20,7 +20,8 @@ pub struct Facing(pub Option<IVec2>);
 
 #[derive(Component)]
 pub struct Genes {
-    pub speed: f32,
+    pub speed: f32, /* tiles / dt */
+    pub size: f32, /* fraction of TILE_SZ */
 }
 
 #[derive(Component)]
@@ -113,7 +114,7 @@ fn metabolize(
         /* TODO: possibly a better abstraction for calculating cost of particular
          * characterestics / stats? */
 
-        let cost = params.base_cost + params.movement_cost * genes.speed * moving;
+        let cost = params.base_cost * genes.size.powf(0.75) * genes.speed.powf(2.0) * moving;
 
         stats.energy -= (time.delta_secs() * cost).max(0.0);
     }
@@ -139,7 +140,12 @@ fn spawn(mut commands: Commands) {
 
     let gposition = IVec2::new(0, 0);
     let position = gposition.as_vec2() * TILE_SZ;
-    let genes = Genes { speed: 4.0 };
+    let genes = Genes {
+        speed: 4.0,
+        size: 0.5,
+    };
+
+    let sprite_rect = Vec2::splat(TILE_SZ * genes.size);
 
     commands
         .spawn((
@@ -156,7 +162,7 @@ fn spawn(mut commands: Commands) {
             c.spawn((
                 Sprite::from_color(
                     Color::srgb(0.2, 0.7, 0.5),
-                    Vec2::new(TILE_SZ * 0.5, TILE_SZ * 0.5),
+                    sprite_rect,
                 ),
                 Transform::from_translation(position.extend(0.5)),
             ));
