@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
 use crate::creature::WorldPos;
+use crate::sim::SimParams;
 
 #[derive(Clone, Copy)]
 pub enum FoodKind {
@@ -17,8 +18,16 @@ impl FoodKind {
     }
 }
 
+pub struct FoodPlugin;
+
+impl Plugin for FoodPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(FixedUpdate, (decay, decompose).chain());
+    }
+}
+
 #[derive(Component)]
-pub struct Food {
+pub struct FoodDetails {
     /* FIXME: better name perhaps? The energy gained from consuming a
     particular food item depends on the amount of food (quality) and the
     digestive efficiency of that creature at consuming the food's kind */
@@ -31,24 +40,38 @@ pub struct Food {
     pub kind: FoodKind,
 }
 
-impl Food {
-    pub fn new(kind: FoodKind, quality: f32) -> Self {
-        Self {
-            kind,
-            quality,
-            freshness: 1.0,
+#[derive(Component)]
+pub struct Food;
+
+fn decay(time: Res<Time>, params: Res<SimParams>, mut q: Query<&mut FoodDetails, With<Food>>) {
+    for mut details in &mut q {
+        details.freshness -= params.food_decay_rate * time.delta_secs();
+    }
+}
+
+fn decompose(mut commands: Commands, q: Query<(Entity, &FoodDetails), With<Food>>) {
+    for (entity, details) in &q {
+        if details.freshness <= -1.0 {
+            commands.entity(entity).despawn();
         }
     }
+}
 
-    pub fn bundle(pos: Vec2, kind: FoodKind, quality: f32) -> impl Bundle {
-        /* TODO: food size proportional to quality */
-        let sz = 8.0;
+pub fn bundle(pos: Vec2, kind: FoodKind, quality: f32) -> impl Bundle {
+    /* TODO: food size proportional to quality */
+    let sz = 8.0;
 
-        (
-            Food::new(kind, quality),
-            WorldPos(pos),
-            Transform::default(),
-            Sprite::from_color(kind.color(), Vec2::new(sz, sz / 2.0)),
-        )
-    }
+    let details = FoodDetails {
+        kind,
+        quality,
+        freshness: 1.0,
+    };
+
+    (
+        Food,
+        details,
+        WorldPos(pos),
+        Transform::default(),
+        Sprite::from_color(kind.color(), Vec2::new(sz, sz / 2.0)),
+    )
 }

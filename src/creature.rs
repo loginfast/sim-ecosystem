@@ -5,6 +5,7 @@ use crate::TILE_SZ;
 use crate::food::{Food, FoodKind};
 use crate::grid_to_world;
 use crate::sim::SimParams;
+use crate::food;
 
 #[derive(Component)]
 pub struct Creature;
@@ -123,7 +124,7 @@ fn metabolize(
 fn die(mut commands: Commands, q: Query<(Entity, &Genes, &WorldPos, &Stats), With<Creature>>) {
     for (entity, _, pos, Stats { energy }) in &q {
         if *energy <= 0.0 {
-            commands.spawn(Food::bundle(
+            commands.spawn(food::bundle(
                 pos.0,
                 FoodKind::Carcass,
                 20.0, /* TODO: food quality proportional to size gene and energy */

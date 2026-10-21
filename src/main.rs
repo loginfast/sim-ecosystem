@@ -55,6 +55,7 @@ fn main() {
         .add_plugins(EguiPlugin::default())
         .add_plugins(camera::CameraControlPlugin)
         .add_plugins(creature::CreaturePlugin)
+        .add_plugins(food::FoodPlugin)
         .add_plugins(ui::UiPlugin)
         .add_systems(Startup, setup)
         .run();
