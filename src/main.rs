@@ -1,7 +1,6 @@
 mod camera;
 mod creature;
 mod food;
-mod iso;
 mod sim;
 mod ui;
 
@@ -9,9 +8,13 @@ use bevy::prelude::*;
 
 use bevy_egui::EguiPlugin;
 
-use iso::{TILE_H, TILE_W, world_to_screen};
+pub const TILE_SZ: f32 = 32.0;
 
 const GRID_SIZE: i32 = 128;
+
+fn grid_to_world(p: IVec2) -> Vec2 {
+    p.as_vec2() * TILE_SZ + Vec2::new(TILE_SZ / 2.0, TILE_SZ / 2.0)
+}
 
 fn setup(
     mut commands: Commands,
@@ -19,11 +22,11 @@ fn setup(
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     let mid = (GRID_SIZE - 1) as f32 / 2.0;
-    let mid = world_to_screen(mid, mid);
+    let mid = Vec2::new(mid, mid);
 
     commands.spawn((Camera2d, Transform::from_xyz(mid.x, mid.y, 0.0)));
 
-    let diamond = meshes.add(Rhombus::new(TILE_W, TILE_H));
+    let square = meshes.add(Rectangle::new(TILE_SZ, TILE_SZ));
     let light = materials.add(Color::srgb(0.72, 0.78, 0.60));
     let dark = materials.add(Color::srgb(0.62, 0.69, 0.50));
 
@@ -34,9 +37,11 @@ fn setup(
             } else {
                 dark.clone()
             };
-            let p = world_to_screen(i as f32, j as f32);
+
+            let p = grid_to_world(IVec2::new(i, j));
+
             commands.spawn((
-                Mesh2d(diamond.clone()),
+                Mesh2d(square.clone()),
                 MeshMaterial2d(material),
                 Transform::from_xyz(p.x, p.y, 0.0),
             ));

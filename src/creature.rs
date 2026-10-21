@@ -1,10 +1,9 @@
-use std::f32::consts::SQRT_2;
-
 use bevy::prelude::*;
 
 use crate::GRID_SIZE;
+use crate::TILE_SZ;
 use crate::food::{Food, FoodKind};
-use crate::iso::{TILE_H, TILE_W, world_to_screen};
+use crate::grid_to_world;
 use crate::sim::SimParams;
 
 #[derive(Component)]
@@ -42,13 +41,13 @@ impl Plugin for CreaturePlugin {
 
 fn facing(keys: Res<ButtonInput<KeyCode>>, mut q: Query<&mut Facing, With<Creature>>) {
     let dir = if keys.pressed(KeyCode::ArrowUp) {
-        Some(IVec2::new(-1, 0))
-    } else if keys.pressed(KeyCode::ArrowRight) {
-        Some(IVec2::new(0, -1))
-    } else if keys.pressed(KeyCode::ArrowDown) {
-        Some(IVec2::new(1, 0))
-    } else if keys.pressed(KeyCode::ArrowLeft) {
         Some(IVec2::new(0, 1))
+    } else if keys.pressed(KeyCode::ArrowRight) {
+        Some(IVec2::new(1, 0))
+    } else if keys.pressed(KeyCode::ArrowDown) {
+        Some(IVec2::new(0, -1))
+    } else if keys.pressed(KeyCode::ArrowLeft) {
+        Some(IVec2::new(-1, 0))
     } else {
         None
     };
@@ -59,11 +58,12 @@ fn facing(keys: Res<ButtonInput<KeyCode>>, mut q: Query<&mut Facing, With<Creatu
 
 fn advance(time: Res<Time>, mut q: Query<(&mut WorldPos, &GridPos, &Genes), With<Creature>>) {
     for (mut pos, grid, gene) in &mut q {
-        let to = grid.0.as_vec2() - pos.0;
+        let to = grid_to_world(grid.0) - pos.0;
         let dist = to.length();
-        let step = gene.speed * time.delta_secs();
+        let step = gene.speed * TILE_SZ * time.delta_secs();
+
         pos.0 = if dist <= step {
-            grid.0.as_vec2()
+            grid_to_world(grid.0)
         } else {
             pos.0 + to / dist * step
         };
@@ -71,14 +71,15 @@ fn advance(time: Res<Time>, mut q: Query<(&mut WorldPos, &GridPos, &Genes), With
 }
 
 fn start_step(mut q: Query<(&mut GridPos, &WorldPos, &Facing), With<Creature>>) {
-    for (mut grid, pos, intent) in &mut q {
-        if pos.0.distance(grid.0.as_vec2()) > 1e-4 {
+    for (mut gpos, pos, intent) in &mut q {
+        if pos.0.distance(grid_to_world(gpos.0)) > 1e-4 {
             continue;
         }
+
         let Some(dir) = intent.0 else { continue };
-        let next = grid.0 + dir;
+        let next = gpos.0 + dir;
         if next.cmpge(IVec2::ZERO).all() && next.cmplt(IVec2::splat(GRID_SIZE)).all() {
-            grid.0 = next;
+            gpos.0 = next;
         }
     }
 }
@@ -90,9 +91,8 @@ fn update(mut q: Query<(&WorldPos, &mut Transform), Or<(With<Creature>, With<Foo
     /* Introduce z-ordering for isometric projection */
     const DEPTH_EPS: f32 = 0.001;
 
-    for (pos, mut t) in &mut q {
-        let s = world_to_screen(pos.0.x, pos.0.y);
-        t.translation = Vec3::new(s.x, s.y, 1.0 + (pos.0.x + pos.0.y) * DEPTH_EPS);
+    for (p, mut t) in &mut q {
+        t.translation = p.0.extend(1.0 + (p.0.x + p.0.y) * DEPTH_EPS);
     }
 }
 
@@ -133,44 +133,32 @@ fn die(mut commands: Commands, q: Query<(Entity, &Genes, &WorldPos, &Stats), Wit
     }
 }
 
-fn spawn(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-) {
-    const SHADOW_RADIUS: f32 = 0.4;
-
+fn spawn(mut commands: Commands) {
     /* TODO: procedural color
      * TODO: default position */
 
-    let shadow_mesh = meshes.add(Ellipse::new(
-        SHADOW_RADIUS * TILE_W / SQRT_2,
-        SHADOW_RADIUS * TILE_H / SQRT_2,
-    ));
-    let shadow_mat = materials.add(Color::srgba(0.0, 0.0, 0.0, 0.3));
+    let gposition = IVec2::new(0, 0);
+    let position = gposition.as_vec2() * TILE_SZ;
+    let genes = Genes { speed: 4.0 };
 
     commands
         .spawn((
             Creature,
-            WorldPos(Vec2::new(10.0, 10.0)),
-            GridPos(IVec2::new(10, 10)),
+            WorldPos(position),
+            GridPos(gposition),
             Facing::default(),
-            Genes { speed: 4.0 },
+            genes,
             Stats { energy: 100.0 },
             Transform::default(),
             Visibility::default(),
         ))
         .with_children(|c| {
-            /* shadow first, sprite over that*/
             c.spawn((
-                Mesh2d(shadow_mesh),
-                MeshMaterial2d(shadow_mat),
-                Transform::from_xyz(0.0, 0.0, 0.0),
-            ));
-
-            c.spawn((
-                Sprite::from_color(Color::srgb(0.2, 0.7, 0.5), Vec2::new(16.0, 24.0)),
-                Transform::from_xyz(0.0, 12.0, 0.5),
+                Sprite::from_color(
+                    Color::srgb(0.2, 0.7, 0.5),
+                    Vec2::new(TILE_SZ * 0.5, TILE_SZ * 0.5),
+                ),
+                Transform::from_translation(position.extend(0.5)),
             ));
         });
 }

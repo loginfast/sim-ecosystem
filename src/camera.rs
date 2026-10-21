@@ -3,15 +3,16 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use crate::creature::{Creature, WorldPos};
-use crate::iso::world_to_screen;
+
+use crate::TILE_SZ;
 
 const ZOOM_MIN: f32 = 0.25;
 const ZOOM_MAX: f32 = 4.0;
 const ZOOM_PER_LINE: f32 = 0.1;
 const ZOOM_PER_PIXEL: f32 = 0.002;
 
-const BODY_CENTER_Y: f32 = 12.0;
-const PICK_RADIUS: f32 = 16.0;
+const BODY_CENTER_Y: f32 = TILE_SZ * 0.25;
+const PICK_RADIUS: f32 = TILE_SZ;
 
 /* Lock the camera to a creature */
 #[derive(Resource, Default)]
@@ -47,7 +48,7 @@ fn pick_creature(
     follow.0 = creatures
         .iter()
         .map(|(e, p)| {
-            let s = world_to_screen(p.0.x, p.0.y) + Vec2::new(0.0, BODY_CENTER_Y);
+            let s = p.0 + Vec2::new(0.0, BODY_CENTER_Y);
             (e, s.distance(point))
         })
         .filter(|(_, d)| *d < PICK_RADIUS)
@@ -65,7 +66,7 @@ fn follow_camera(
         follow.0 = None;
         return;
     };
-    let s = world_to_screen(pos.0.x, pos.0.y) + Vec2::new(0.0, BODY_CENTER_Y);
+    let s = pos.0 + Vec2::new(0.0, BODY_CENTER_Y);
     camera.translation.x = s.x;
     camera.translation.y = s.y;
 }
