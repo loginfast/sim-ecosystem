@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
+use rand::RngExt;
 
+use crate::food::{FoodKind, bundle};
 use crate::{GRID_SIZE, TILE_SZ, grid_to_world};
 
 // ---------------------------------------------------------------------------
@@ -277,6 +279,43 @@ fn spawn_world(
     commands.insert_resource(grid);
 }
 
+fn plant_density(biome: Biome) -> f32 {
+    match biome {
+        Biome::Rainforest => 0.30,
+        Biome::Grassland => 0.12,
+        Biome::Desert => 0.01,
+        Biome::Snowy => 0.005,
+    }
+}
+
+fn spawn_plants(mut commands: Commands, world: Res<WorldGrid>) {
+    let mut rng = rand::rng();
+
+    for y in 0..GRID_SIZE {
+        for x in 0..GRID_SIZE {
+            let cell = IVec2::new(x, y);
+
+            let Some(biome) = world.biome_at(cell) else {
+                continue;
+            };
+
+            // Roll the dice for this tile.
+            if rng.random::<f32>() >= plant_density(biome) {
+                continue;
+            }
+
+            // Scatter the plant within the tile so they don't sit on a perfect grid.
+            let jitter = Vec2::new(
+                rng.random_range(-0.5..0.5) * TILE_SZ,
+                rng.random_range(-0.5..0.5) * TILE_SZ,
+            );
+
+            let quality = rng.random_range(0.5..1.0);
+            commands.spawn(bundle(grid_to_world(cell) + jitter, FoodKind::Plant, quality));
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
@@ -285,6 +324,7 @@ pub struct WorldGenPlugin;
 
 impl Plugin for WorldGenPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_world);
+        app.add_systems(Startup, spawn_world)
+            .add_systems(PostStartup, spawn_plants);
     }
 }
