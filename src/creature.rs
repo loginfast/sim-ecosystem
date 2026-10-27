@@ -2,10 +2,10 @@ use bevy::prelude::*;
 
 use crate::GRID_SIZE;
 use crate::TILE_SZ;
+use crate::food;
 use crate::food::{Food, FoodKind};
 use crate::grid_to_world;
 use crate::sim::SimParams;
-use crate::food;
 
 #[derive(Component)]
 pub struct Creature;
@@ -22,7 +22,7 @@ pub struct Facing(pub Option<IVec2>);
 #[derive(Component)]
 pub struct Genes {
     pub speed: f32, /* tiles / dt */
-    pub size: f32, /* fraction of TILE_SZ */
+    pub size: f32,  /* fraction of TILE_SZ */
 }
 
 #[derive(Component)]
@@ -161,10 +161,7 @@ fn spawn(mut commands: Commands) {
         ))
         .with_children(|c| {
             c.spawn((
-                Sprite::from_color(
-                    Color::srgb(0.2, 0.7, 0.5),
-                    sprite_rect,
-                ),
+                Sprite::from_color(Color::srgb(0.2, 0.7, 0.5), sprite_rect),
                 Transform::from_translation(position.extend(0.5)),
             ));
         });

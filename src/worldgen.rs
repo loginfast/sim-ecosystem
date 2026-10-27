@@ -9,8 +9,6 @@ use crate::{GRID_SIZE, TILE_SZ, grid_to_world};
 // Tunables
 // ---------------------------------------------------------------------------
 
-const SEED: u32 = 1337;
-
 // Lower frequency = bigger biome regions.
 const TEMP_FREQUENCY: f64 = 0.02;
 const HUMIDITY_FREQUENCY: f64 = 0.025;
@@ -68,6 +66,15 @@ impl Biome {
             Biome::Grassland => Color::srgb(0.72, 0.78, 0.60),
         }
     }
+
+    fn plant_density(self) -> f32 {
+        match self {
+            Biome::Rainforest => 0.30,
+            Biome::Grassland => 0.12,
+            Biome::Desert => 0.01,
+            Biome::Snowy => 0.005,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -85,9 +92,6 @@ pub struct WorldGrid {
 
 impl WorldGrid {
     pub fn get(&self, p: IVec2) -> Option<&Tile> {
-        if p.x < 0 || p.y < 0 || p.x >= GRID_SIZE || p.y >= GRID_SIZE {
-            return None;
-        }
         self.tiles.get((p.y * GRID_SIZE + p.x) as usize)
     }
 
@@ -106,14 +110,11 @@ fn normalize(v: f64) -> f32 {
 }
 
 fn classify(temperature: f32, humidity: f32) -> Biome {
-    if temperature < COLD_BELOW {
-        Biome::Snowy
-    } else if temperature > HOT_ABOVE && humidity < DRY_BELOW {
-        Biome::Desert
-    } else if temperature > HOT_ABOVE && humidity > WET_ABOVE {
-        Biome::Rainforest
-    } else {
-        Biome::Grassland
+    match (temperature, humidity) {
+        (t, _) if t < COLD_BELOW => Biome::Snowy,
+        (t, h) if t > HOT_ABOVE && h < DRY_BELOW => Biome::Desert,
+        (t, h) if t > HOT_ABOVE && h > WET_ABOVE => Biome::Rainforest,
+        _ => Biome::Grassland,
     }
 }
 
@@ -248,7 +249,8 @@ fn spawn_world(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    let grid = generate(SEED);
+    let seed: u32 = rand::random();
+    let grid = generate(seed);
 
     // One shared mesh for every tile.
     let square = meshes.add(Rectangle::new(TILE_SZ, TILE_SZ));
@@ -279,15 +281,6 @@ fn spawn_world(
     commands.insert_resource(grid);
 }
 
-fn plant_density(biome: Biome) -> f32 {
-    match biome {
-        Biome::Rainforest => 0.30,
-        Biome::Grassland => 0.12,
-        Biome::Desert => 0.01,
-        Biome::Snowy => 0.005,
-    }
-}
-
 fn spawn_plants(mut commands: Commands, world: Res<WorldGrid>) {
     let mut rng = rand::rng();
 
@@ -300,18 +293,14 @@ fn spawn_plants(mut commands: Commands, world: Res<WorldGrid>) {
             };
 
             // Roll the dice for this tile.
-            if rng.random::<f32>() >= plant_density(biome) {
+            if rng.random::<f32>() >= biome.plant_density() {
                 continue;
             }
 
             // Scatter the plant within the tile so they don't sit on a perfect grid.
-            let jitter = Vec2::new(
-                rng.random_range(-0.5..0.5) * TILE_SZ,
-                rng.random_range(-0.5..0.5) * TILE_SZ,
-            );
 
             let quality = rng.random_range(0.5..1.0);
-            commands.spawn(bundle(grid_to_world(cell) + jitter, FoodKind::Plant, quality));
+            commands.spawn(bundle(grid_to_world(cell), FoodKind::Plant, quality));
         }
     }
 }
