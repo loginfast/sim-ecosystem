@@ -28,8 +28,8 @@ pub struct Genes {
 
 impl Genes {
     fn mutate(&self, rng: &mut impl Rng, params: &Res<SimParams>) -> Self {
-        let p = params.gene_pick_probability;
-        let f = params.gene_mutation_factor;
+        let p = params.gene_pick_probability.into_inner() as f32;
+        let f = params.gene_mutation_factor.into_inner() as f32;
         let mut one = |gene: f32, factor: f32, min: f32, max: f32| -> f32 {
             if rng.random_bool(p.into()) {
                 let range = (1.0 - factor)..(1.0 + factor);
