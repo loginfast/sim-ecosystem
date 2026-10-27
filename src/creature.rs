@@ -8,6 +8,8 @@ use crate::food::{Food, FoodKind};
 use crate::grid_to_world;
 use crate::sim::SimParams;
 
+use crate::ranged::NoNaNF32;
+
 #[derive(Component)]
 pub struct Creature;
 
@@ -68,28 +70,38 @@ impl Plugin for CreaturePlugin {
         app.init_resource::<SimParams>()
             .init_resource::<Counter>()
             .add_systems(Startup, spawn)
-            .add_systems(Update, (update, facing))
+            .add_systems(Update, update)
             .add_systems(
                 FixedUpdate,
-                (start_step, advance, metabolize, die, reproduce).chain(),
+                (facing, start_step, advance, metabolize, die, reproduce).chain(),
             );
     }
 }
 
-fn facing(keys: Res<ButtonInput<KeyCode>>, mut q: Query<&mut Facing, With<Creature>>) {
-    let dir = if keys.pressed(KeyCode::ArrowUp) {
-        Some(IVec2::new(0, 1))
-    } else if keys.pressed(KeyCode::ArrowRight) {
-        Some(IVec2::new(1, 0))
-    } else if keys.pressed(KeyCode::ArrowDown) {
-        Some(IVec2::new(0, -1))
-    } else if keys.pressed(KeyCode::ArrowLeft) {
-        Some(IVec2::new(-1, 0))
-    } else {
-        None
-    };
-    for mut f in &mut q {
-        f.0 = dir;
+fn facing(
+    mut qcreature: Query<(&mut Facing, &WorldPos), With<Creature>>,
+    qfood: Query<&WorldPos, With<Food>>,
+) {
+    let search_radius = 10.0 * (GRID_SIZE as f32);
+
+    for (mut facing, pos) in &mut qcreature {
+        let mut foods = qfood
+            .iter()
+            .map(|x| (x, (x.0 - pos.0).length()))
+            .filter(|(_, d)| *d <= search_radius)
+            .collect::<Vec<_>>();
+
+        foods.sort_by_key(|(_, d)| NoNaNF32::try_new(*d).unwrap());
+
+        let nearest = foods[0].0;
+        let direction = (nearest.0 - pos.0).normalize();
+        let direction = if direction.x.abs() > direction.y.abs() {
+            IVec2::new(direction.x.signum() as i32, 0)
+        } else {
+            IVec2::new(0, direction.y.signum() as i32)
+        };
+
+        facing.0 = Some(direction);
     }
 }
 
