@@ -2,6 +2,8 @@ use bevy::prelude::*;
 
 use crate::creature::WorldPos;
 use crate::sim::SimParams;
+use crate::worldgen::WorldGrid;
+use crate::world_to_grid;
 
 #[derive(Clone, Copy)]
 pub enum FoodKind {
@@ -43,9 +45,17 @@ pub struct FoodDetails {
 #[derive(Component)]
 pub struct Food;
 
-fn decay(time: Res<Time>, params: Res<SimParams>, mut q: Query<&mut FoodDetails, With<Food>>) {
-    for mut details in &mut q {
-        details.freshness -= params.food_decay_rate * time.delta_secs();
+fn decay(
+    time: Res<Time>,
+    params: Res<SimParams>,
+    world: Res<WorldGrid>,
+    mut q: Query<(&mut FoodDetails, &WorldPos), With<Food>>,
+) {
+    for (mut details, pos) in &mut q {
+        let cell = world_to_grid(pos.0);
+        let multiplier = world.biome_at(cell).map_or(1.0, |b| b.decay_multiplier());
+
+        details.freshness -= params.food_decay_rate * time.delta_secs() * multiplier;
     }
 }
 
@@ -57,14 +67,14 @@ fn decompose(mut commands: Commands, q: Query<(Entity, &FoodDetails), With<Food>
     }
 }
 
-pub fn bundle(pos: Vec2, kind: FoodKind, quality: f32) -> impl Bundle {
+pub fn bundle(pos: Vec2, kind: FoodKind, quality: f32, freshness: f32) -> impl Bundle {
     /* TODO: food size proportional to quality */
     let sz = 8.0;
 
     let details = FoodDetails {
         kind,
         quality,
-        freshness: 1.0,
+        freshness,
     };
 
     (
