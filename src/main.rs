@@ -1,6 +1,7 @@
 mod camera;
 mod creature;
 mod food;
+mod ranged;
 mod sim;
 mod ui;
 mod worldgen;
@@ -14,7 +15,7 @@ pub const TILE_SZ: f32 = 32.0;
 const GRID_SIZE: i32 = 128;
 
 fn grid_to_world(p: IVec2) -> Vec2 {
-    p.as_vec2() * TILE_SZ + Vec2::new(TILE_SZ / 2.0, TILE_SZ / 2.0)
+    p.as_vec2() * TILE_SZ + Vec2::splat(TILE_SZ / 2.0)
 }
 
 fn setup(mut commands: Commands) {
