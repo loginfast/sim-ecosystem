@@ -9,7 +9,7 @@ use crate::food::{Food, FoodKind, FoodDetails};
 use crate::grid_to_world;
 use crate::sim::SimParams;
 
-use crate::ranged::{NoNaNF32, SignedUnitInterval};
+use crate::ranged::{NoNaNF32, SignedUnitInterval, UnitInterval};
 
 #[derive(Component)]
 pub struct Creature;
@@ -202,7 +202,7 @@ fn eat(
             if pos.0.distance_squared(food_pos.0) <= eat_radius_squared && eaten.insert(entity) {
                 /* TODO: diet */
                 /* TODO: how do creatures know food isn't fresh? */
-                stats.energy += food_details.quality * food_details.freshness * 2.0;
+                stats.energy += food_details.quality * food_details.freshness.into_inner() as f32 * 2.0;
                 commands.entity(entity).despawn();
             }
         }
@@ -216,7 +216,7 @@ fn die(mut commands: Commands, q: Query<(Entity, &Genes, &WorldPos, &Stats), Wit
                 pos.0,
                 FoodKind::Carcass,
                 20.0,
-                1.0, /* TODO: food quality proportional to size gene and energy */
+                UnitInterval::try_new(1.0).unwrap(),
             ));
 
             commands.entity(entity).despawn();
