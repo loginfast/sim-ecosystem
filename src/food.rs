@@ -1,11 +1,10 @@
 use bevy::prelude::*;
 
-use crate::creature::WorldPos;
+use crate::GRID_SIZE;
+use crate::creature::{CreatureSimulation, WorldPos};
 use crate::sim::SimParams;
 use crate::worldgen::WorldGrid;
-use crate::world_to_grid;
-use crate::TILE_SZ;
-use crate::GRID_SIZE;
+use crate::{grid_to_world, world_to_grid};
 use rand::RngExt;
 
 #[derive(Clone, Copy)]
@@ -27,7 +26,10 @@ pub struct FoodPlugin;
 
 impl Plugin for FoodPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(FixedUpdate, (decay, decompose).chain());
+        app.add_systems(
+            FixedUpdate,
+            (decay, decompose).chain().before(CreatureSimulation),
+        );
     }
 }
 
@@ -64,32 +66,39 @@ fn decay(
 
 fn decompose(mut commands: Commands, q: Query<(Entity, &FoodDetails, &WorldPos), With<Food>>) {
     let mut rng = rand::rng();
-    let map_size = GRID_SIZE as f32 * TILE_SZ;
     for (entity, details, pos) in &q {
         if details.freshness <= -1.0 {
             commands.entity(entity).despawn();
-            let roll = rng.random::<f32>();
-            let offspring = if roll < 0.6 {
-                1
-            } else if roll < 0.8 {
-                0
-            } else {
-                2
-        };
-        for _ in 0..offspring {
-            let spread = TILE_SZ * 3.0;
-            let offset = Vec2::new(
-                rng.random_range(-spread..spread),
-                rng.random_range(-spread..spread),
-            );
-            let new_pos = (pos.0 + offset).clamp(Vec2::ZERO, Vec2::splat(map_size - 0.01));
-            let quality = rng.random_range(0.5..1.0);
-            let freshness = rng.random_range(-0.5..1.0);
-            commands.spawn(bundle(new_pos, FoodKind::Plant, quality, freshness));
-        }
+            if matches!(details.kind, FoodKind::Plant) {
+                regrow_plants(&mut commands, pos.0, &mut rng);
+            }
         }
     }
+}
 
+fn regrow_plants(commands: &mut Commands, pos: Vec2, rng: &mut impl rand::Rng) {
+    // Preserve the existing odds: 60% one plant, 20% none, 20% two.
+    let roll = rng.random::<f32>();
+    let offspring = if roll < 0.6 {
+        1
+    } else if roll < 0.8 {
+        0
+    } else {
+        2
+    };
+    let cell = world_to_grid(pos);
+    for _ in 0..offspring {
+        let offset = IVec2::new(rng.random_range(-3..=3), rng.random_range(-3..=3));
+        let new_cell = (cell + offset).clamp(IVec2::ZERO, IVec2::splat(GRID_SIZE - 1));
+        let quality = rng.random_range(0.5..1.0);
+        let freshness = rng.random_range(-0.5..1.0);
+        commands.spawn(bundle(
+            grid_to_world(new_cell),
+            FoodKind::Plant,
+            quality,
+            freshness,
+        ));
+    }
 }
 
 pub fn bundle(pos: Vec2, kind: FoodKind, quality: f32, freshness: f32) -> impl Bundle {
@@ -106,7 +115,113 @@ pub fn bundle(pos: Vec2, kind: FoodKind, quality: f32, freshness: f32) -> impl B
         Food,
         details,
         WorldPos(pos),
-        Transform::default(),
+        Transform::from_translation(pos.extend(0.25)),
         Sprite::from_color(kind.color(), Vec2::new(sz, sz / 2.0)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::{SeedableRng, rngs::StdRng};
+
+    #[test]
+    fn expired_plant_is_replaced_only_by_fresh_regrowth() {
+        let mut app = App::new();
+        app.add_systems(Update, decompose);
+        let plant = app
+            .world_mut()
+            .spawn(bundle(
+                grid_to_world(IVec2::ZERO),
+                FoodKind::Plant,
+                1.0,
+                -1.0,
+            ))
+            .id();
+        app.update();
+
+        assert!(app.world().get_entity(plant).is_err());
+        let mut query = app
+            .world_mut()
+            .query_filtered::<(&WorldPos, &FoodDetails), With<Food>>();
+        assert!(query.iter(app.world()).count() <= 2);
+        for (pos, details) in query.iter(app.world()) {
+            assert!(matches!(details.kind, FoodKind::Plant));
+            assert!(details.freshness > -1.0);
+            assert_eq!(pos.0, grid_to_world(world_to_grid(pos.0)));
+        }
+    }
+
+    #[test]
+    fn decomposition_removes_carcasses_without_growing_plants_and_leaves_fresh_food_alone() {
+        let mut app = App::new();
+        app.add_systems(Update, decompose);
+        let carcass = app
+            .world_mut()
+            .spawn(bundle(Vec2::ZERO, FoodKind::Carcass, 1.0, -1.0))
+            .id();
+        let plant = app
+            .world_mut()
+            .spawn(bundle(Vec2::ZERO, FoodKind::Plant, 1.0, 0.0))
+            .id();
+        app.update();
+
+        assert!(app.world().get_entity(carcass).is_err());
+        assert!(app.world().get_entity(plant).is_ok());
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Food>>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+    }
+
+    #[derive(Resource)]
+    struct Regrowth {
+        rng: StdRng,
+        pos: Vec2,
+    }
+
+    fn seeded_regrowth(mut commands: Commands, mut regrowth: ResMut<Regrowth>) {
+        let pos = regrowth.pos;
+        regrow_plants(&mut commands, pos, &mut regrowth.rng);
+    }
+
+    #[test]
+    fn regrowth_can_produce_zero_one_or_two_reachable_plants_inside_the_map() {
+        for cell in [
+            IVec2::ZERO,
+            IVec2::new(0, GRID_SIZE - 1),
+            IVec2::new(GRID_SIZE - 1, 0),
+            IVec2::splat(GRID_SIZE - 1),
+        ] {
+            let mut app = App::new();
+            app.insert_resource(Regrowth {
+                rng: StdRng::seed_from_u64(42),
+                pos: grid_to_world(cell),
+            })
+            .add_systems(Update, seeded_regrowth);
+            let mut seen = [false; 3];
+            let mut previous_count = 0;
+            for _ in 0..64 {
+                app.update();
+                let mut query = app
+                    .world_mut()
+                    .query_filtered::<(&WorldPos, &FoodDetails), With<Food>>();
+                let count = query.iter(app.world()).count();
+                seen[count - previous_count] = true;
+                previous_count = count;
+                for (pos, details) in query.iter(app.world()) {
+                    let new_cell = world_to_grid(pos.0);
+                    assert!(new_cell.cmpge(IVec2::ZERO).all());
+                    assert!(new_cell.cmplt(IVec2::splat(GRID_SIZE)).all());
+                    assert!((new_cell - cell).abs().cmple(IVec2::splat(3)).all());
+                    assert_eq!(pos.0, grid_to_world(new_cell));
+                    assert!(matches!(details.kind, FoodKind::Plant));
+                }
+            }
+            assert_eq!(seen, [true; 3]);
+        }
+    }
 }

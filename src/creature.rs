@@ -1,11 +1,12 @@
+use bevy::ecs::entity::EntityHashSet;
 use bevy::prelude::*;
 use rand::{Rng, RngExt, seq::IteratorRandom};
 
 use crate::GRID_SIZE;
 use crate::TILE_SZ;
 use crate::food;
-use crate::food::{Food, FoodDetails, FoodKind};
-use crate::{grid_to_world, world_to_grid};
+use crate::food::{Food, FoodKind};
+use crate::grid_to_world;
 use crate::sim::SimParams;
 
 use crate::ranged::{NoNaNF32, SignedUnitInterval};
@@ -69,6 +70,9 @@ impl Default for Stats {
 
 pub struct CreaturePlugin;
 
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CreatureSimulation;
+
 #[derive(Resource, Default)]
 pub struct Counter(u32);
 
@@ -80,7 +84,9 @@ impl Plugin for CreaturePlugin {
             .add_systems(Update, update)
             .add_systems(
                 FixedUpdate,
-                (facing, start_step, advance, eat, metabolize, die, reproduce).chain(),
+                (facing, start_step, advance, eat, metabolize, die, reproduce)
+                    .chain()
+                    .in_set(CreatureSimulation),
             );
     }
 }
@@ -90,7 +96,7 @@ fn facing(
     qfood: Query<&WorldPos, With<Food>>,
 ) {
     for (mut facing, gpos, pos, genes) in &mut qcreature {
-        let r = (genes.vision_radius * GRID_SIZE as u32) as f32;
+        let r = genes.vision_radius as f32 * TILE_SZ;
 
         let mut foods = qfood
             .iter()
@@ -101,13 +107,17 @@ fn facing(
         foods.sort_by_key(|(_, d)| NoNaNF32::try_new(*d).unwrap());
 
         /* TODO: pick a random direction */
-        let Some(nearest) = foods.get(0) else {
+        let Some(nearest) = foods.first() else {
             let mut rng = rand::rng();
             facing.0 = pick_direction(&gpos, &mut rng);
             continue;
         };
 
-        let direction = (nearest.0.0 - pos.0).normalize();
+        let direction = nearest.0.0 - pos.0;
+        if direction == Vec2::ZERO {
+            facing.0 = None;
+            continue;
+        }
         let direction = if direction.x.abs() > direction.y.abs() {
             IVec2::new(direction.x.signum() as i32, 0)
         } else {
@@ -161,11 +171,7 @@ fn metabolize(
     mut q: Query<(&Genes, &mut Stats, &WorldPos, &GridPos), With<Creature>>,
 ) {
     for (genes, mut stats, pos, gpos) in &mut q {
-        /* FIXME: better way to sort out moving?
-         * the current system just checks whether the sprite is very close to
-         * the tile center and accepts that as stationary. This could be a bug */
-
-        let moving = pos.0.distance(gpos.0.as_vec2()) > 1e-4;
+        let moving = pos.0.distance(grid_to_world(gpos.0)) > 1e-4;
 
         let moving = if moving { 1.0 } else { 0.0 };
 
@@ -181,13 +187,15 @@ fn metabolize(
 fn eat(
     mut commands: Commands,
     mut qcreature: Query<(&WorldPos, &mut Stats), With<Creature>>,
-    qfood: Query<(Entity, &WorldPos, &FoodDetails), With<Food>>,
+    qfood: Query<(Entity, &WorldPos), With<Food>>,
 ) {
-    let eat_radius = (GRID_SIZE as f32) / 10.0;
+    // Half a tile's diagonal reaches every point in a tile from its center.
+    let eat_radius_squared = TILE_SZ * TILE_SZ / 2.0;
+    let mut eaten = EntityHashSet::default();
 
     for (pos, mut stats) in &mut qcreature {
-        for (entity, food_pos, food_details) in &qfood {
-            if (pos.0 - food_pos.0).length() <= eat_radius {
+        for (entity, food_pos) in &qfood {
+            if pos.0.distance_squared(food_pos.0) <= eat_radius_squared && eaten.insert(entity) {
                 /* TODO: diet */
                 /* TODO: how do creatures know food isn't fresh? */
                 // energy += food_details.quality * food_details.freshness * 100.0;
@@ -241,15 +249,13 @@ fn reproduce(
     for (genes, gpos) in &q {
         let mut rng = rand::rng();
         let genes_ = genes.mutate(&mut rng, &params);
-        let gpos_ = GridPos(
-            gpos.0 + pick_direction(&gpos, &mut rng).unwrap_or(IVec2::ZERO)
-        );
+        let gpos_ = GridPos(gpos.0 + pick_direction(&gpos, &mut rng).unwrap_or(IVec2::ZERO));
         commands.spawn(spawn_creature(gpos_, genes_));
     }
 }
 
 fn spawn_creature(gpos: GridPos, genes: Genes) -> impl Bundle {
-    let pos = gpos.0.as_vec2() * TILE_SZ;
+    let pos = grid_to_world(gpos.0);
     let rect = Vec2::splat(TILE_SZ * genes.size);
     let sprite = Sprite::from_color(Color::srgb(0.2, 0.7, 0.5), rect);
 
@@ -260,9 +266,9 @@ fn spawn_creature(gpos: GridPos, genes: Genes) -> impl Bundle {
         genes,
         Facing::default(),
         Stats::default(),
-        Transform::default(),
+        Transform::from_translation(pos.extend(0.0)),
         Visibility::default(),
-        children![(sprite, Transform::from_translation(pos.extend(0.5)),)],
+        children![(sprite, Transform::from_xyz(0.0, 0.0, 0.5),)],
     )
 }
 
@@ -279,4 +285,187 @@ fn spawn(mut commands: Commands) {
     };
 
     commands.spawn(spawn_creature(gpos, genes));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn genes() -> Genes {
+        Genes {
+            speed: 1.0,
+            size: 0.5,
+            vision_radius: 10,
+            diet: SignedUnitInterval::try_new(0.0).unwrap(),
+        }
+    }
+
+    fn app_with_time(seconds: f32) -> App {
+        let mut app = App::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(Duration::from_secs_f32(seconds));
+        app.insert_resource(time);
+        app
+    }
+
+    #[test]
+    fn creature_sprite_tracks_its_world_position_without_a_spawn_offset() {
+        let mut app = App::new();
+        app.add_plugins(TransformPlugin).add_systems(Update, update);
+        let cell = IVec2::splat(GRID_SIZE - 1);
+        let creature = app
+            .world_mut()
+            .spawn(spawn_creature(GridPos(cell), genes()))
+            .id();
+        assert_eq!(
+            app.world().get::<WorldPos>(creature).unwrap().0,
+            grid_to_world(cell)
+        );
+
+        for position in [
+            grid_to_world(cell),
+            grid_to_world(cell) - Vec2::new(8.0, 0.0),
+        ] {
+            app.world_mut().get_mut::<WorldPos>(creature).unwrap().0 = position;
+            app.update();
+            let sprite = app.world().get::<Children>(creature).unwrap()[0];
+            let visible = app
+                .world()
+                .get::<GlobalTransform>(sprite)
+                .unwrap()
+                .translation();
+            assert_eq!(visible.truncate(), position);
+            assert_eq!(visible.z, 0.5);
+        }
+    }
+
+    #[test]
+    fn newborn_can_start_moving_and_cannot_step_outside_the_map() {
+        let mut app = app_with_time(1.0);
+        app.add_systems(Update, (start_step, advance).chain());
+        let cell = IVec2::new(12, 34);
+        let newborn = app
+            .world_mut()
+            .spawn(spawn_creature(GridPos(cell), genes()))
+            .id();
+        app.world_mut().get_mut::<Facing>(newborn).unwrap().0 = Some(IVec2::X);
+
+        for corner in [
+            IVec2::ZERO,
+            IVec2::new(0, GRID_SIZE - 1),
+            IVec2::new(GRID_SIZE - 1, 0),
+            IVec2::splat(GRID_SIZE - 1),
+        ] {
+            for dir in [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y] {
+                let creature = app
+                    .world_mut()
+                    .spawn(spawn_creature(GridPos(corner), genes()))
+                    .id();
+                app.world_mut().get_mut::<Facing>(creature).unwrap().0 = Some(dir);
+            }
+        }
+
+        app.update();
+        assert_eq!(
+            app.world().get::<GridPos>(newborn).unwrap().0,
+            cell + IVec2::X
+        );
+        assert_eq!(
+            app.world().get::<WorldPos>(newborn).unwrap().0,
+            grid_to_world(cell + IVec2::X)
+        );
+        for _ in 0..3 {
+            app.update();
+            for (grid, pos) in app
+                .world_mut()
+                .query::<(&GridPos, &WorldPos)>()
+                .iter(app.world())
+            {
+                assert!(in_bounds(grid.0));
+                assert_eq!(pos.0, grid_to_world(grid.0));
+            }
+        }
+    }
+
+    #[test]
+    fn offspring_spawn_on_a_neighboring_tile_near_the_parent() {
+        for cell in [IVec2::ZERO, IVec2::new(42, 60), IVec2::splat(GRID_SIZE - 1)] {
+            let mut app = App::new();
+            app.init_resource::<SimParams>()
+                .insert_resource(Counter(SimParams::default().reproduction_tick.get()))
+                .add_systems(Update, reproduce);
+            let parent = app
+                .world_mut()
+                .spawn(spawn_creature(GridPos(cell), genes()))
+                .id();
+            app.update();
+
+            let mut query = app
+                .world_mut()
+                .query_filtered::<(Entity, &GridPos, &WorldPos), With<Creature>>();
+            assert_eq!(query.iter(app.world()).count(), 2);
+            for (entity, grid, pos) in query.iter(app.world()) {
+                if entity != parent {
+                    assert!(in_bounds(grid.0));
+                    assert_eq!((grid.0 - cell).abs().element_sum(), 1);
+                    assert_eq!(pos.0, grid_to_world(grid.0));
+                    assert_eq!(pos.0.distance(grid_to_world(cell)), TILE_SZ);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn creature_reaches_and_eats_food_between_tile_centers() {
+        let mut app = app_with_time(0.125);
+        app.add_systems(Update, (facing, start_step, advance, eat).chain());
+        let cell = IVec2::new(30, 40);
+        let creature = app
+            .world_mut()
+            .spawn(spawn_creature(GridPos(cell), genes()))
+            .id();
+        let food_pos = (cell + IVec2::new(3, 2)).as_vec2() * TILE_SZ + Vec2::splat(0.1);
+        let food = app
+            .world_mut()
+            .spawn(food::bundle(food_pos, FoodKind::Plant, 1.0, 1.0))
+            .id();
+
+        for _ in 0..80 {
+            app.update();
+            if app.world().get_entity(food).is_err() {
+                break;
+            }
+        }
+        assert!(
+            app.world().get_entity(food).is_err(),
+            "creature never reached the food"
+        );
+        assert_eq!(app.world().get::<Stats>(creature).unwrap().energy, 110.0);
+    }
+
+    #[test]
+    fn food_is_consumed_only_once_when_creatures_share_a_tile() {
+        let mut app = App::new();
+        app.add_systems(Update, eat);
+        let cell = IVec2::new(10, 20);
+        for _ in 0..2 {
+            app.world_mut()
+                .spawn(spawn_creature(GridPos(cell), genes()));
+        }
+        let food = app
+            .world_mut()
+            .spawn(food::bundle(grid_to_world(cell), FoodKind::Plant, 1.0, 1.0))
+            .id();
+        app.update();
+
+        let energy: f32 = app
+            .world_mut()
+            .query::<&Stats>()
+            .iter(app.world())
+            .map(|s| s.energy)
+            .sum();
+        assert_eq!(energy, 210.0);
+        assert!(app.world().get_entity(food).is_err());
+    }
 }
