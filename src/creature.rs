@@ -160,7 +160,8 @@ fn die(mut commands: Commands, q: Query<(Entity, &Genes, &WorldPos, &Stats), Wit
             commands.spawn(food::bundle(
                 pos.0,
                 FoodKind::Carcass,
-                20.0, /* TODO: food quality proportional to size gene and energy */
+                20.0,
+                1.0, /* TODO: food quality proportional to size gene and energy */
             ));
 
             commands.entity(entity).despawn();

@@ -75,7 +75,15 @@ impl Biome {
             Biome::Snowy => 0.005,
         }
     }
-}
+    
+    pub fn decay_multiplier(self) -> f32 {
+    match self {
+        Biome::Rainforest => 1.5,
+            Biome::Grassland => 1.0,
+            Biome::Desert => 2.0,
+            Biome::Snowy => 0.5,
+    }
+}}
 
 #[derive(Clone, Copy, Debug)]
 pub struct Tile {
@@ -297,10 +305,10 @@ fn spawn_plants(mut commands: Commands, world: Res<WorldGrid>) {
                 continue;
             }
 
-            // Scatter the plant within the tile so they don't sit on a perfect grid.
 
             let quality = rng.random_range(0.5..1.0);
-            commands.spawn(bundle(grid_to_world(cell), FoodKind::Plant, quality));
+            let freshness = rng.random_range(-0.5..1.0);
+            commands.spawn(bundle(grid_to_world(cell), FoodKind::Plant, quality, freshness));
         }
     }
 }
