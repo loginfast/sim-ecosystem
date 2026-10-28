@@ -18,6 +18,10 @@ fn grid_to_world(p: IVec2) -> Vec2 {
     p.as_vec2() * TILE_SZ + Vec2::splat(TILE_SZ / 2.0)
 }
 
+fn world_to_grid(p: Vec2) -> IVec2 {
+    (p / TILE_SZ).floor().as_ivec2()
+}
+
 fn setup(mut commands: Commands) {
     let mid = (GRID_SIZE - 1) as f32 / 2.0;
     commands.spawn((Camera2d, Transform::from_xyz(mid, mid, 0.0)));
