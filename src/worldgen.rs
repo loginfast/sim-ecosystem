@@ -75,15 +75,16 @@ impl Biome {
             Biome::Snowy => 0.005,
         }
     }
-    
+
     pub fn decay_multiplier(self) -> f32 {
-    match self {
-        Biome::Rainforest => 1.5,
+        match self {
+            Biome::Rainforest => 1.5,
             Biome::Grassland => 1.0,
             Biome::Desert => 2.0,
             Biome::Snowy => 0.5,
+        }
     }
-}}
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct Tile {
@@ -100,6 +101,9 @@ pub struct WorldGrid {
 
 impl WorldGrid {
     pub fn get(&self, p: IVec2) -> Option<&Tile> {
+        if p.cmplt(IVec2::ZERO).any() || p.cmpge(IVec2::splat(GRID_SIZE)).any() {
+            return None;
+        }
         self.tiles.get((p.y * GRID_SIZE + p.x) as usize)
     }
 
@@ -305,10 +309,14 @@ fn spawn_plants(mut commands: Commands, world: Res<WorldGrid>) {
                 continue;
             }
 
-
             let quality = rng.random_range(0.5..1.0);
             let freshness = rng.random_range(-0.5..1.0);
-            commands.spawn(bundle(grid_to_world(cell), FoodKind::Plant, quality, freshness));
+            commands.spawn(bundle(
+                grid_to_world(cell),
+                FoodKind::Plant,
+                quality,
+                freshness,
+            ));
         }
     }
 }
@@ -323,5 +331,76 @@ impl Plugin for WorldGenPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_world)
             .add_systems(PostStartup, spawn_plants);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn grassland() -> WorldGrid {
+        WorldGrid {
+            tiles: vec![
+                Tile {
+                    temperature: 0.5,
+                    humidity: 0.5,
+                    biome: Biome::Grassland
+                };
+                (GRID_SIZE * GRID_SIZE) as usize
+            ],
+        }
+    }
+
+    #[test]
+    fn grid_lookup_rejects_out_of_bounds_coordinates_instead_of_aliasing_other_rows() {
+        let grid = grassland();
+        assert!(grid.get(IVec2::ZERO).is_some());
+        assert!(grid.get(IVec2::splat(GRID_SIZE - 1)).is_some());
+        for cell in [
+            IVec2::new(GRID_SIZE, 0),
+            IVec2::new(-1, 1),
+            IVec2::new(0, -1),
+            IVec2::new(0, GRID_SIZE),
+        ] {
+            assert!(grid.get(cell).is_none());
+        }
+    }
+
+    #[test]
+    fn fixed_simulation_decomposes_food_before_creatures_choose_and_eat_it() {
+        use crate::creature::{Creature, CreaturePlugin, Stats};
+        use crate::food::{Food, FoodPlugin};
+        use std::time::Duration;
+
+        let mut app = App::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(Duration::from_secs_f32(1.0 / 64.0));
+        app.insert_resource(time)
+            .insert_resource(grassland())
+            .add_plugins((CreaturePlugin, FoodPlugin));
+        app.update();
+
+        let pos = grid_to_world(IVec2::ZERO);
+        app.world_mut()
+            .spawn(bundle(pos, FoodKind::Carcass, 1.0, -1.0));
+        app.world_mut()
+            .spawn(bundle(pos, FoodKind::Plant, 1.0, 1.0));
+        app.world_mut().run_schedule(FixedUpdate);
+
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<&Stats, With<Creature>>()
+                .single(app.world())
+                .unwrap()
+                .energy,
+            110.0
+        );
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Food>>()
+                .iter(app.world())
+                .count(),
+            0
+        );
     }
 }
