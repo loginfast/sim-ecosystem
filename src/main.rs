@@ -19,7 +19,9 @@ fn grid_to_world(p: IVec2) -> Vec2 {
 }
 
 fn world_to_grid(p: Vec2) -> IVec2 {
-    (p / TILE_SZ).floor().as_ivec2()
+    ((p - Vec2::splat(TILE_SZ / 2.0)) / TILE_SZ)
+        .floor()
+        .as_ivec2()
 }
 
 fn setup(mut commands: Commands) {

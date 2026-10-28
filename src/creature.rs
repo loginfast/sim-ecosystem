@@ -1,14 +1,14 @@
 use bevy::prelude::*;
-use rand::{Rng, RngExt};
+use rand::{Rng, RngExt, seq::IteratorRandom};
 
 use crate::GRID_SIZE;
 use crate::TILE_SZ;
 use crate::food;
 use crate::food::{Food, FoodDetails, FoodKind};
-use crate::grid_to_world;
+use crate::{grid_to_world, world_to_grid};
 use crate::sim::SimParams;
 
-use crate::ranged::NoNaNF32;
+use crate::ranged::{NoNaNF32, SignedUnitInterval};
 
 #[derive(Component)]
 pub struct Creature;
@@ -24,8 +24,10 @@ pub struct Facing(pub Option<IVec2>);
 
 #[derive(Component, Clone, Copy)]
 pub struct Genes {
-    pub speed: f32, /* tiles / dt */
-    pub size: f32,  /* fraction of TILE_SZ */
+    pub speed: f32,               /* tiles / dt */
+    pub size: f32,                /* fraction of TILE_SZ */
+    pub diet: SignedUnitInterval, /* -1 is carnivorous, 1 is herbivorous */
+    pub vision_radius: u32,       /* grids */
 }
 
 impl Genes {
@@ -45,6 +47,11 @@ impl Genes {
             /* TODO: move min / max fine-tuning to sim::SimParams */
             speed: one(self.speed, f, 0.1, 10.0),
             size: one(self.size, f, 0.05, 0.95),
+            vision_radius: one(self.vision_radius as f32, f, 4 as f32, GRID_SIZE as f32) as u32,
+            diet: SignedUnitInterval::try_new(
+                one(self.diet.into_inner() as f32, f, -1.0, 1.0).into(),
+            )
+            .unwrap(),
         }
     }
 }
@@ -79,23 +86,24 @@ impl Plugin for CreaturePlugin {
 }
 
 fn facing(
-    mut qcreature: Query<(&mut Facing, &WorldPos), With<Creature>>,
+    mut qcreature: Query<(&mut Facing, &GridPos, &WorldPos, &Genes), With<Creature>>,
     qfood: Query<&WorldPos, With<Food>>,
 ) {
-    let search_radius = 10.0 * (GRID_SIZE as f32);
+    for (mut facing, gpos, pos, genes) in &mut qcreature {
+        let r = (genes.vision_radius * GRID_SIZE as u32) as f32;
 
-    for (mut facing, pos) in &mut qcreature {
         let mut foods = qfood
             .iter()
             .map(|x| (x, (x.0 - pos.0).length()))
-            .filter(|(_, d)| *d <= search_radius)
+            .filter(|(_, d)| *d <= r)
             .collect::<Vec<_>>();
 
         foods.sort_by_key(|(_, d)| NoNaNF32::try_new(*d).unwrap());
 
         /* TODO: pick a random direction */
         let Some(nearest) = foods.get(0) else {
-            facing.0 = None;
+            let mut rng = rand::rng();
+            facing.0 = pick_direction(&gpos, &mut rng);
             continue;
         };
 
@@ -183,7 +191,7 @@ fn eat(
                 /* TODO: diet */
                 /* TODO: how do creatures know food isn't fresh? */
                 // energy += food_details.quality * food_details.freshness * 100.0;
-                stats.energy += 100.0;
+                stats.energy += 10.0;
                 commands.entity(entity).despawn();
             }
         }
@@ -209,20 +217,12 @@ fn in_bounds(p: IVec2) -> bool {
     p.cmpge(IVec2::ZERO).all() && p.cmplt(IVec2::splat(GRID_SIZE)).all()
 }
 
-fn pick_direction(gpos: &GridPos) -> GridPos {
-    for i in -1..=1 {
-        for j in -1..=1 {
-            if i == 0 && j == 0 {
-                continue;
-            }
-            let p = gpos.0 + IVec2::new(i, j);
-            if in_bounds(p) {
-                return GridPos(p);
-            }
-        }
-    }
-
-    panic!("atleast one direction should be in bounds")
+fn pick_direction(gpos: &GridPos, rng: &mut impl rand::Rng) -> Option<IVec2> {
+    const DIRS: [IVec2; 4] = [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y];
+    DIRS.iter()
+        .filter(|&d| in_bounds(gpos.0 + d))
+        .choose(rng)
+        .copied()
 }
 
 fn reproduce(
@@ -241,7 +241,9 @@ fn reproduce(
     for (genes, gpos) in &q {
         let mut rng = rand::rng();
         let genes_ = genes.mutate(&mut rng, &params);
-        let gpos_ = pick_direction(gpos);
+        let gpos_ = GridPos(
+            gpos.0 + pick_direction(&gpos, &mut rng).unwrap_or(IVec2::ZERO)
+        );
         commands.spawn(spawn_creature(gpos_, genes_));
     }
 }
@@ -272,6 +274,8 @@ fn spawn(mut commands: Commands) {
     let genes = Genes {
         speed: 0.5,
         size: 0.5,
+        vision_radius: 10,
+        diet: SignedUnitInterval::try_new(0.0).unwrap(),
     };
 
     commands.spawn(spawn_creature(gpos, genes));
