@@ -2261,7 +2261,7 @@ checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cpufeatures",
- "rand_core",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -3034,7 +3034,7 @@ dependencies = [
  "js-sys",
  "libc",
  "r-efi 6.0.0",
- "rand_core",
+ "rand_core 0.10.1",
  "wasm-bindgen",
 ]
 
@@ -5527,8 +5527,9 @@ dependencies = [
  "bevy",
  "bevy_ecs",
  "bevy_egui",
+ "noise",
  "nutype",
- "rand",
+ "rand 0.10.3",
 ]
 
 [[package]]

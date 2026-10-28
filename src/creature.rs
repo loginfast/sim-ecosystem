@@ -4,9 +4,11 @@ use rand::{Rng, RngExt};
 use crate::GRID_SIZE;
 use crate::TILE_SZ;
 use crate::food;
-use crate::food::{Food, FoodKind};
+use crate::food::{Food, FoodDetails, FoodKind};
 use crate::grid_to_world;
 use crate::sim::SimParams;
+
+use crate::ranged::NoNaNF32;
 
 #[derive(Component)]
 pub struct Creature;
@@ -68,28 +70,43 @@ impl Plugin for CreaturePlugin {
         app.init_resource::<SimParams>()
             .init_resource::<Counter>()
             .add_systems(Startup, spawn)
-            .add_systems(Update, (update, facing))
+            .add_systems(Update, update)
             .add_systems(
                 FixedUpdate,
-                (start_step, advance, metabolize, die, reproduce).chain(),
+                (facing, start_step, advance, eat, metabolize, die, reproduce).chain(),
             );
     }
 }
 
-fn facing(keys: Res<ButtonInput<KeyCode>>, mut q: Query<&mut Facing, With<Creature>>) {
-    let dir = if keys.pressed(KeyCode::ArrowUp) {
-        Some(IVec2::new(0, 1))
-    } else if keys.pressed(KeyCode::ArrowRight) {
-        Some(IVec2::new(1, 0))
-    } else if keys.pressed(KeyCode::ArrowDown) {
-        Some(IVec2::new(0, -1))
-    } else if keys.pressed(KeyCode::ArrowLeft) {
-        Some(IVec2::new(-1, 0))
-    } else {
-        None
-    };
-    for mut f in &mut q {
-        f.0 = dir;
+fn facing(
+    mut qcreature: Query<(&mut Facing, &WorldPos), With<Creature>>,
+    qfood: Query<&WorldPos, With<Food>>,
+) {
+    let search_radius = 10.0 * (GRID_SIZE as f32);
+
+    for (mut facing, pos) in &mut qcreature {
+        let mut foods = qfood
+            .iter()
+            .map(|x| (x, (x.0 - pos.0).length()))
+            .filter(|(_, d)| *d <= search_radius)
+            .collect::<Vec<_>>();
+
+        foods.sort_by_key(|(_, d)| NoNaNF32::try_new(*d).unwrap());
+
+        /* TODO: pick a random direction */
+        let Some(nearest) = foods.get(0) else {
+            facing.0 = None;
+            continue;
+        };
+
+        let direction = (nearest.0.0 - pos.0).normalize();
+        let direction = if direction.x.abs() > direction.y.abs() {
+            IVec2::new(direction.x.signum() as i32, 0)
+        } else {
+            IVec2::new(0, direction.y.signum() as i32)
+        };
+
+        facing.0 = Some(direction);
     }
 }
 
@@ -122,8 +139,7 @@ fn start_step(mut q: Query<(&mut GridPos, &WorldPos, &Facing), With<Creature>>) 
 }
 
 /* TODO: update is just a general drawing function at this point,
- *       maybe abstract this to it's own render module?
- * FIXME: introduce an explicit Z-Ordering for shadows, food, creatures, etc. */
+ *       maybe abstract this to it's own render module? */
 fn update(mut q: Query<(&WorldPos, &mut Transform), Or<(With<Creature>, With<Food>)>>) {
     for (p, mut t) in &mut q {
         t.translation.x = p.0.x;
@@ -151,6 +167,26 @@ fn metabolize(
         let cost = params.base_cost * genes.size.powf(0.75) * genes.speed.powf(2.0) * moving;
 
         stats.energy -= (time.delta_secs() * cost).max(0.0);
+    }
+}
+
+fn eat(
+    mut commands: Commands,
+    mut qcreature: Query<(&WorldPos, &mut Stats), With<Creature>>,
+    qfood: Query<(Entity, &WorldPos, &FoodDetails), With<Food>>,
+) {
+    let eat_radius = (GRID_SIZE as f32) / 10.0;
+
+    for (pos, mut stats) in &mut qcreature {
+        for (entity, food_pos, food_details) in &qfood {
+            if (pos.0 - food_pos.0).length() <= eat_radius {
+                /* TODO: diet */
+                /* TODO: how do creatures know food isn't fresh? */
+                // energy += food_details.quality * food_details.freshness * 100.0;
+                stats.energy += 100.0;
+                commands.entity(entity).despawn();
+            }
+        }
     }
 }
 
@@ -234,7 +270,7 @@ fn spawn(mut commands: Commands) {
 
     let gpos = GridPos(IVec2::new(0, 0));
     let genes = Genes {
-        speed: 4.0,
+        speed: 0.5,
         size: 0.5,
     };
 

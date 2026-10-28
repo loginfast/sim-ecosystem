@@ -1,6 +1,12 @@
 use nutype::nutype;
 
 #[nutype(
+    validate(finite),
+    derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Display)
+)]
+pub struct NoNaNF32(f32);
+
+#[nutype(
     validate(finite, greater_or_equal = 0, less_or_equal = 1),
     derive(Clone, Copy, PartialEq, Eq, PartialOrd, Display)
 )]
