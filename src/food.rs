@@ -71,7 +71,6 @@ fn decompose(mut commands: Commands, q: Query<(Entity, &FoodDetails), With<Food>
     }
 }
 
-
 pub fn bundle(pos: Vec2, kind: FoodKind, quality: f32, freshness: UnitInterval) -> impl Bundle {
     /* TODO: food size proportional to quality */
     let sz = 8.0;
