@@ -7,6 +7,7 @@ use crate::ranged::UnitInterval;
 #[derive(Resource)]
 pub struct SimParams {
     pub initial_creature_count: u32,
+    pub initial_energy_range: RangeInclusive<f32>,
     pub base_cost: f32,
     pub food_decay_rate: f32,
     pub gene_pick_probability: UnitInterval,
@@ -42,6 +43,7 @@ impl Default for SimParams {
     fn default() -> Self {
         Self {
             initial_creature_count: 100,
+            initial_energy_range: 80.0..=150.0,
             base_cost: 0.8,
             food_decay_rate: 0.05,
             gene_pick_probability: UnitInterval::try_new(0.3).unwrap(),
@@ -51,6 +53,8 @@ impl Default for SimParams {
             reproduction_cost: 50.0,
             attack_radius: 3.0,
             carcass_quality_multiplier: 40.0,
+
+
 
             speed_min: 0.1,
             speed_max: 10.0,

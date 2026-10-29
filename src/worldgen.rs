@@ -6,6 +6,7 @@ use crate::food::{FoodKind, bundle};
 use crate::ranged::UnitInterval;
 use crate::sim::SimParams;
 use crate::{GRID_SIZE, TILE_SZ, grid_to_world};
+use crate::sim::SimParams;
 
 // ---------------------------------------------------------------------------
 // Tunables

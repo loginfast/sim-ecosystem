@@ -289,8 +289,6 @@ fn start_step(mut q: Query<(&mut GridPos, &WorldPos, &Facing), With<Creature>>) 
     }
 }
 
-/* TODO: update is just a general drawing function at this point,
- *       maybe abstract this to it's own render module? */
 fn update(mut q: Query<(&WorldPos, &mut Transform), Or<(With<Creature>, With<Food>)>>) {
     for (p, mut t) in &mut q {
         t.translation.x = p.0.x;
@@ -328,6 +326,7 @@ fn metabolize(
 fn eat(
     mut commands: Commands,
     mut qcreature: Query<(&WorldPos, &Genes, &mut Stats), With<Creature>>,
+    params: Res<SimParams>,
     qfood: Query<(Entity, &WorldPos, &FoodDetails), With<Food>>,
 ) {
     let eat_radius_squared = TILE_SZ * TILE_SZ / 2.0;
@@ -340,7 +339,7 @@ fn eat(
                 && pos.0.distance_squared(food_pos.0) <= eat_radius_squared
                 && eaten.insert(entity)
             {
-                stats.energy += gain;
+                stats.energy = (stats.energy + gain).max(params.max_energy);
                 commands.entity(entity).despawn();
             }
         }
@@ -450,7 +449,7 @@ fn spawn_creature<R: Rng>(
         genes,
         Facing::default(),
         Stats {
-            energy: 100.0,
+            energy: rng.random_range(params.initial_energy_range.clone()),
             reproduction_ticks_remaining: rng.random_range(params.reproduction_tick.clone()),
         },
         Transform::from_translation(pos.extend(0.0)),
