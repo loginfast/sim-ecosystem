@@ -5,11 +5,11 @@ use rand::{Rng, RngExt, seq::IteratorRandom};
 use crate::GRID_SIZE;
 use crate::TILE_SZ;
 use crate::food;
-use crate::food::{Food, FoodKind, FoodDetails};
+use crate::food::{Food, FoodDetails, FoodKind};
 use crate::grid_to_world;
 use crate::sim::SimParams;
 
-use crate::ranged::{NoNaNF32, SignedUnitInterval, UnitInterval};
+use crate::ranged::{SignedUnitInterval, UnitInterval};
 
 #[derive(Component)]
 pub struct Creature;
@@ -25,33 +25,59 @@ pub struct Facing(pub Option<IVec2>);
 
 #[derive(Component, Clone, Copy)]
 pub struct Genes {
-    pub speed: f32,               /* tiles / dt */
+    pub speed: f32,               /* tiles / second */
     pub size: f32,                /* fraction of TILE_SZ */
     pub diet: SignedUnitInterval, /* -1 is carnivorous, 1 is herbivorous */
     pub vision_radius: u32,       /* grids */
+    pub attack: f32,
 }
 
 impl Genes {
-    fn mutate(&self, rng: &mut impl Rng, params: &Res<SimParams>) -> Self {
+    fn random(rng: &mut impl Rng, params: &SimParams) -> Self {
+        Self {
+            speed: rng.random_range(params.speed_min..=params.speed_max),
+            size: rng.random_range(params.size_min..=params.size_max),
+            vision_radius: rng.random_range(params.vision_radius_min..=params.vision_radius_max),
+            attack: rng.random_range(params.attack_min..=params.attack_max),
+            diet: SignedUnitInterval::try_new(
+                rng.random_range(params.diet_min..=params.diet_max).into(),
+            )
+            .unwrap(),
+        }
+    }
+
+    fn mutate(&self, rng: &mut impl Rng, params: &SimParams) -> Self {
         let p = params.gene_pick_probability.into_inner() as f32;
         let f = params.gene_mutation_factor.into_inner() as f32;
         let mut one = |gene: f32, factor: f32, min: f32, max: f32| -> f32 {
             if rng.random_bool(p.into()) {
-                let range = (1.0 - factor)..(1.0 + factor);
-                gene * rng.random_range(range).clamp(min, max)
+                let range = (1.0 - factor)..=(1.0 + factor);
+                (gene * rng.random_range(range)).clamp(min, max)
             } else {
                 gene
             }
         };
 
         Self {
-            speed: one(self.speed, f, 0.1, params.speed_max),
-            size: one(self.size, f, 0.05, params.size_max),
-            vision_radius: one(self.vision_radius as f32, f, 4 as f32, params.vision_radius_max as f32) as u32,
+            speed: one(self.speed, f, params.speed_min, params.speed_max),
+            size: one(self.size, f, params.size_min, params.size_max),
+            vision_radius: one(
+                self.vision_radius as f32,
+                f,
+                params.vision_radius_min as f32,
+                params.vision_radius_max as f32,
+            ) as u32,
             diet: SignedUnitInterval::try_new(
-                one(self.diet.into_inner() as f32, f, -1.0, 1.0).into(),
+                one(
+                    self.diet.into_inner() as f32,
+                    f,
+                    params.diet_min,
+                    params.diet_max,
+                )
+                .into(),
             )
             .unwrap(),
+            attack: one(self.attack, f, params.attack_min, params.attack_max),
         }
     }
 }
@@ -59,12 +85,7 @@ impl Genes {
 #[derive(Component)]
 pub struct Stats {
     pub energy: f32,
-}
-
-impl Default for Stats {
-    fn default() -> Self {
-        Self { energy: 100.0 }
-    }
+    pub reproduction_ticks_remaining: u32,
 }
 
 pub struct CreaturePlugin;
@@ -72,47 +93,160 @@ pub struct CreaturePlugin;
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CreatureSimulation;
 
-#[derive(Resource, Default)]
-pub struct Counter(u32);
-
 impl Plugin for CreaturePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SimParams>()
-            .init_resource::<Counter>()
             .add_systems(Startup, spawn)
             .add_systems(Update, update)
             .add_systems(
                 FixedUpdate,
-                (facing, start_step, advance, eat, metabolize, die, reproduce)
+                (
+                    facing, start_step, advance, attack, eat, metabolize, reproduce, die,
+                )
                     .chain()
                     .in_set(CreatureSimulation),
             );
     }
 }
 
-fn facing(
-    mut qcreature: Query<(&mut Facing, &GridPos, &WorldPos, &Genes), With<Creature>>,
-    qfood: Query<&WorldPos, With<Food>>,
+/// Lower is better. None = not worth considering.
+fn hunting_cost(
+    prey_size: f32,
+    dist: f32, // tiles
+    hunter: &Genes,
+    p: &SimParams,
+) -> Option<f64> {
+    if !can_hunt(hunter, p) || hunter.attack <= 0.0 || prey_size <= 0.0 {
+        return None;
+    }
+
+    let e_gain = food_energy(hunter, &corpse_food(&p, prey_size));
+    let fight_secs = p.max_energy * prey_size / hunter.attack;
+
+    let chase = dist * move_cost_per_tile(hunter, p);
+    let fight = fight_secs * (burn_rate(hunter, p, 0.0) + attack_burn(hunter, p));
+
+    // Don't hunt at a loss
+    if chase + fight >= e_gain {
+        return None;
+    }
+
+    Some(((chase + fight) / e_gain).into())
+}
+
+fn can_hunt(genes: &Genes, params: &SimParams) -> bool {
+    let aggression = -genes.diet.into_inner();
+    aggression > 0.0 && aggression > params.min_aggression.into()
+}
+
+fn attack(
+    time: Res<Time>,
+    params: Res<SimParams>,
+    mut q: Query<(Entity, &WorldPos, &Genes, &mut Stats), With<Creature>>,
 ) {
-    for (mut facing, gpos, pos, genes) in &mut qcreature {
-        let r = genes.vision_radius as f32 * TILE_SZ;
+    let dt = time.delta_secs();
+    let r2 = (params.attack_radius * TILE_SZ).powf(2.0);
 
-        let mut foods = qfood
+    let snap: Vec<(Entity, Vec2, f32)> = q.iter().map(|(e, p, g, _)| (e, p.0, g.size)).collect();
+
+    let mut damage: Vec<(Entity, f32)> = Vec::new();
+
+    for (me, pos, genes, mut stats) in &mut q {
+        if stats.energy <= 0.0 {
+            continue;
+        }
+        if !can_hunt(genes, &params) {
+            continue;
+        }
+
+        let victim = snap
             .iter()
-            .map(|x| (x, (x.0 - pos.0).length()))
-            .filter(|(_, d)| *d <= r)
-            .collect::<Vec<_>>();
+            .filter(|(e, ..)| *e != me)
+            .map(|(e, p, size)| (*e, *size, (*p - pos.0).length_squared()))
+            .filter(|(_, _, d2)| *d2 < r2)
+            .min_by(|a, b| a.2.total_cmp(&b.2));
 
-        foods.sort_by_key(|(_, d)| NoNaNF32::try_new(*d).unwrap());
+        let Some((victim, victim_size, _)) = victim else {
+            continue;
+        };
 
-        /* TODO: pick a random direction */
-        let Some(nearest) = foods.first() else {
+        damage.push((victim, genes.attack / victim_size * dt));
+        stats.energy -= attack_burn(genes, &params) * dt;
+    }
+
+    for (victim, dmg) in damage {
+        if let Ok((_, _, _, mut s)) = q.get_mut(victim) {
+            s.energy -= dmg;
+        }
+    }
+}
+
+/// Energy per second spent while attacking. Grows with the attack gene.
+fn attack_burn(genes: &Genes, p: &SimParams) -> f32 {
+    let a = genes.attack / p.attack_max;
+    p.base_cost * p.w_attack * a * a
+}
+
+fn facing(
+    mut qcreature: Query<(Entity, &mut Facing, &GridPos, &WorldPos, &Genes), With<Creature>>,
+    qprey: Query<(Entity, &WorldPos, &Genes), With<Creature>>,
+    qfood: Query<(&WorldPos, &FoodDetails), With<Food>>,
+    params: Res<SimParams>,
+) {
+    for (me, mut facing, gpos, pos, genes) in &mut qcreature {
+        let r = genes.vision_radius as f32;
+        let c_move = move_cost_per_tile(genes, &params);
+
+        /* TODO: move cost determination to a new function
+         * decoupled from path-finding */
+        let food_cost = |food: (&WorldPos, &FoodDetails)| {
+            let (food_pos, details) = food;
+            let d = (food_pos.0 - pos.0).abs();
+            let dist = (d.x + d.y) / TILE_SZ;
+            let gain = food_energy(genes, details);
+            if gain <= 0.0 {
+                return None;
+            }
+            let cost = (dist * c_move / gain) as f64;
+            Some((*food_pos, dist, cost))
+        };
+
+        let hunt = |(prey_pos, prey_genes): (&WorldPos, &Genes)| -> Option<(WorldPos, f32, f64)> {
+            let d = (prey_pos.0 - pos.0).abs();
+            let dist = (d.x + d.y) / TILE_SZ;
+            if dist > r {
+                return None;
+            }
+            let cost = hunting_cost(prey_genes.size, dist, genes, &params)?;
+            Some((*prey_pos, dist, cost))
+        };
+
+        let food = qfood
+            .iter()
+            .filter_map(food_cost)
+            .filter(|(_, d, _)| *d <= r)
+            .min_by(|a, b| a.2.total_cmp(&b.2));
+
+        let prey = qprey
+            .iter()
+            .filter(|(e, ..)| *e != me)
+            .map(|(_, pos, genes)| (pos, genes))
+            .filter_map(hunt)
+            .min_by(|a, b| a.2.total_cmp(&b.2));
+
+        let target = match (food, prey) {
+            (Some(f), Some(h)) if h.2 < f.2 => Some(h.0),
+            (Some(f), _) => Some(f.0),
+            (None, h) => h.map(|h| h.0),
+        };
+
+        let Some(target_pos) = target else {
             let mut rng = rand::rng();
             facing.0 = pick_direction(&gpos, &mut rng);
             continue;
         };
 
-        let direction = nearest.0.0 - pos.0;
+        let direction = target_pos.0 - pos.0;
         if direction == Vec2::ZERO {
             facing.0 = None;
             continue;
@@ -164,6 +298,18 @@ fn update(mut q: Query<(&WorldPos, &mut Transform), Or<(With<Creature>, With<Foo
     }
 }
 
+fn burn_rate(genes: &Genes, p: &SimParams, moving: f32) -> f32 {
+    let s = genes.size / p.size_max;
+    let v = genes.speed / p.speed_max;
+    let r = genes.vision_radius as f32 / p.vision_radius_max as f32;
+
+    p.base_cost * (p.w_size * s.powi(3) + p.w_move * moving * s * v * v + p.w_vision * r * r)
+}
+
+fn move_cost_per_tile(genes: &Genes, p: &SimParams) -> f32 {
+    burn_rate(genes, p, 1.0) / genes.speed.max(f32::EPSILON)
+}
+
 fn metabolize(
     time: Res<Time>,
     params: Res<SimParams>,
@@ -174,48 +320,65 @@ fn metabolize(
 
         let moving = if moving { 1.0 } else { 0.0 };
 
-        let s = genes.size / params.size_max;
-        let v = genes.speed / params.speed_max;
-        let r = genes.vision_radius as f32 / params.vision_radius_max as f32;
-
-        let upkeep   = params.w_size   * s.powi(3);
-        let movement = params.w_move   * moving * s * v * v;
-        let vision   = params.w_vision * r * r;
-
-        let cost = params.base_cost * (upkeep + movement + vision);
+        let cost = burn_rate(genes, &params, moving);
         stats.energy -= time.delta_secs() * cost;
     }
 }
 
 fn eat(
     mut commands: Commands,
-    mut qcreature: Query<(&WorldPos, &mut Stats), With<Creature>>,
+    mut qcreature: Query<(&WorldPos, &Genes, &mut Stats), With<Creature>>,
     qfood: Query<(Entity, &WorldPos, &FoodDetails), With<Food>>,
 ) {
-    // Half a tile's diagonal reaches every point in a tile from its center.
     let eat_radius_squared = TILE_SZ * TILE_SZ / 2.0;
     let mut eaten = EntityHashSet::default();
 
-    for (pos, mut stats) in &mut qcreature {
+    for (pos, genes, mut stats) in &mut qcreature {
         for (entity, food_pos, food_details) in &qfood {
-            if pos.0.distance_squared(food_pos.0) <= eat_radius_squared && eaten.insert(entity) {
-                /* TODO: diet */
-                /* TODO: how do creatures know food isn't fresh? */
-                stats.energy += food_details.quality * food_details.freshness.into_inner() as f32 * 2.0;
+            let gain = food_energy(genes, food_details);
+            if gain > 0.0
+                && pos.0.distance_squared(food_pos.0) <= eat_radius_squared
+                && eaten.insert(entity)
+            {
+                stats.energy += gain;
                 commands.entity(entity).despawn();
             }
         }
     }
 }
 
-fn die(mut commands: Commands, q: Query<(Entity, &Genes, &WorldPos, &Stats), With<Creature>>) {
-    for (entity, _, pos, Stats { energy }) in &q {
+/// Linear absorption efficiency: plants use 1 + diet, carcasses use 1 - diet.
+fn food_energy(genes: &Genes, food: &FoodDetails) -> f32 {
+    let diet = genes.diet.into_inner() as f32;
+    let efficiency = match food.kind {
+        FoodKind::Plant => 1.0 + diet,
+        FoodKind::Carcass => 1.0 - diet,
+    };
+    2.0 * food.quality * food.freshness.into_inner() as f32 * efficiency
+}
+
+// Shared by death and hunting so predicted fresh-carcass yield matches actual food.
+fn corpse_food(p: &SimParams, prey_size: f32) -> FoodDetails {
+    FoodDetails {
+        kind: FoodKind::Carcass,
+        quality: p.carcass_quality_multiplier * prey_size,
+        freshness: UnitInterval::try_new(1.0).unwrap(),
+    }
+}
+
+fn die(
+    mut commands: Commands,
+    q: Query<(Entity, &Genes, &WorldPos, &Stats), With<Creature>>,
+    p: Res<SimParams>,
+) {
+    for (entity, genes, pos, Stats { energy, .. }) in &q {
         if *energy <= 0.0 {
+            let corpse = corpse_food(&p, genes.size);
             commands.spawn(food::bundle(
                 pos.0,
-                FoodKind::Carcass,
-                20.0,
-                UnitInterval::try_new(1.0).unwrap(),
+                corpse.kind,
+                corpse.quality,
+                corpse.freshness,
             ));
 
             commands.entity(entity).despawn();
@@ -237,26 +400,38 @@ fn pick_direction(gpos: &GridPos, rng: &mut impl rand::Rng) -> Option<IVec2> {
 
 fn reproduce(
     mut commands: Commands,
-    q: Query<(&Genes, &GridPos), With<Creature>>,
-    mut counter: ResMut<Counter>,
+    mut q: Query<(&Genes, &GridPos, &mut Stats), With<Creature>>,
     params: Res<SimParams>,
 ) {
-    if counter.0 < params.reproduction_tick.get() {
-        counter.0 += 1;
-        return;
-    }
+    let mut rng = rand::rng();
+    for (genes, gpos, mut stats) in &mut q {
+        if stats.energy <= 0.0 {
+            continue;
+        }
 
-    counter.0 = 0;
+        stats.reproduction_ticks_remaining = stats.reproduction_ticks_remaining.saturating_sub(1);
+        if stats.reproduction_ticks_remaining > 0 {
+            continue;
+        }
 
-    for (genes, gpos) in &q {
-        let mut rng = rand::rng();
+        stats.energy -= params.reproduction_cost;
+        if stats.energy <= 0.0 {
+            continue;
+        }
+
+        stats.reproduction_ticks_remaining = rng.random_range(params.reproduction_tick.clone());
         let genes_ = genes.mutate(&mut rng, &params);
         let gpos_ = GridPos(gpos.0 + pick_direction(&gpos, &mut rng).unwrap_or(IVec2::ZERO));
-        commands.spawn(spawn_creature(gpos_, genes_));
+        commands.spawn(spawn_creature(gpos_, genes_, &params, &mut rng));
     }
 }
 
-fn spawn_creature(gpos: GridPos, genes: Genes) -> impl Bundle {
+fn spawn_creature<R: Rng>(
+    gpos: GridPos,
+    genes: Genes,
+    params: &SimParams,
+    rng: &mut R,
+) -> impl Bundle + use<R> {
     let pos = grid_to_world(gpos.0);
     let rect = Vec2::splat(TILE_SZ * genes.size);
 
@@ -274,26 +449,26 @@ fn spawn_creature(gpos: GridPos, genes: Genes) -> impl Bundle {
         gpos,
         genes,
         Facing::default(),
-        Stats::default(),
+        Stats {
+            energy: 100.0,
+            reproduction_ticks_remaining: rng.random_range(params.reproduction_tick.clone()),
+        },
         Transform::from_translation(pos.extend(0.0)),
         Visibility::default(),
         children![(sprite, Transform::from_xyz(0.0, 0.0, 0.5),)],
     )
 }
 
-fn spawn(mut commands: Commands) {
-    /* TODO: procedural color
-     * TODO: default position */
-
-    let gpos = GridPos(IVec2::new(0, 0));
-    let genes = Genes {
-        speed: 4.0,
-        size: 0.5,
-        vision_radius: 10,
-        diet: SignedUnitInterval::try_new(0.0).unwrap(),
-    };
-
-    commands.spawn(spawn_creature(gpos, genes));
+fn spawn(mut commands: Commands, params: Res<SimParams>) {
+    let mut rng = rand::rng();
+    for _ in 0..params.initial_creature_count {
+        let gpos = GridPos(IVec2::new(
+            rng.random_range(0..GRID_SIZE),
+            rng.random_range(0..GRID_SIZE),
+        ));
+        let genes = Genes::random(&mut rng, &params);
+        commands.spawn(spawn_creature(gpos, genes, &params, &mut rng));
+    }
 }
 
 #[cfg(test)]
@@ -306,8 +481,13 @@ mod tests {
             speed: 1.0,
             size: 0.5,
             vision_radius: 10,
+            attack: 10.0,
             diet: SignedUnitInterval::try_new(0.0).unwrap(),
         }
+    }
+
+    fn test_creature(gpos: GridPos) -> impl Bundle {
+        spawn_creature(gpos, genes(), &SimParams::default(), &mut rand::rng())
     }
 
     fn app_with_time(seconds: f32) -> App {
@@ -318,15 +498,244 @@ mod tests {
         app
     }
 
+    fn assert_genes_in_bounds(genes: &Genes, params: &SimParams) {
+        assert!((params.speed_min..=params.speed_max).contains(&genes.speed));
+        assert!((params.size_min..=params.size_max).contains(&genes.size));
+        assert!(
+            (params.vision_radius_min..=params.vision_radius_max).contains(&genes.vision_radius)
+        );
+        assert!((params.attack_min..=params.attack_max).contains(&genes.attack));
+        assert!(
+            (params.diet_min as f64..=params.diet_max as f64).contains(&genes.diet.into_inner())
+        );
+    }
+
+    #[test]
+    fn eating_scales_energy_by_diet_and_leaves_indigestible_food() {
+        for (diet, plant_gain, carcass_gain) in [
+            (-1.0, 0.0, 6.0),
+            (-0.5, 1.5, 4.5),
+            (0.0, 3.0, 3.0),
+            (0.5, 4.5, 1.5),
+            (1.0, 6.0, 0.0),
+        ] {
+            for (kind, expected_gain) in [
+                (FoodKind::Plant, plant_gain),
+                (FoodKind::Carcass, carcass_gain),
+            ] {
+                let mut app = App::new();
+                app.add_systems(Update, eat);
+                let mut genes = genes();
+                genes.diet = SignedUnitInterval::try_new(diet).unwrap();
+                let creature = app
+                    .world_mut()
+                    .spawn(spawn_creature(
+                        GridPos(IVec2::ZERO),
+                        genes,
+                        &SimParams::default(),
+                        &mut rand::rng(),
+                    ))
+                    .id();
+                let food = app
+                    .world_mut()
+                    .spawn(food::bundle(
+                        grid_to_world(IVec2::ZERO),
+                        kind,
+                        3.0,
+                        UnitInterval::try_new(0.5).unwrap(),
+                    ))
+                    .id();
+
+                app.update();
+                assert_eq!(
+                    app.world().get::<Stats>(creature).unwrap().energy,
+                    100.0 + expected_gain
+                );
+                assert_eq!(
+                    app.world().get::<Food>(food).is_some(),
+                    expected_gain == 0.0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn food_selection_ignores_food_with_zero_diet_efficiency() {
+        for (diet, preferred, ignored) in [
+            (-1.0, FoodKind::Carcass, FoodKind::Plant),
+            (1.0, FoodKind::Plant, FoodKind::Carcass),
+        ] {
+            let mut app = App::new();
+            app.init_resource::<SimParams>().add_systems(Update, facing);
+            let mut genes = genes();
+            genes.diet = SignedUnitInterval::try_new(diet).unwrap();
+            let cell = IVec2::splat(10);
+            let creature = app
+                .world_mut()
+                .spawn(spawn_creature(
+                    GridPos(cell),
+                    genes,
+                    &SimParams::default(),
+                    &mut rand::rng(),
+                ))
+                .id();
+            for (offset, kind) in [(IVec2::X * 2, preferred), (IVec2::Y, ignored)] {
+                app.world_mut().spawn(food::bundle(
+                    grid_to_world(cell + offset),
+                    kind,
+                    1.0,
+                    UnitInterval::try_new(1.0).unwrap(),
+                ));
+            }
+
+            app.update();
+            assert_eq!(
+                app.world().get::<Facing>(creature).unwrap().0,
+                Some(IVec2::X)
+            );
+        }
+    }
+
+    #[test]
+    fn hunting_uses_absorbed_carcass_energy_and_all_attack_costs() {
+        let params = SimParams {
+            base_cost: 1.0,
+            size_max: 1.0,
+            speed_max: 1.0,
+            attack_max: 10.0,
+            w_size: 0.0,
+            w_vision: 0.0,
+            w_move: 1.0,
+            w_attack: 1.0,
+            ..default()
+        };
+        let mut hunter = genes();
+        for (diet, expected_cost) in [(-1.0, 0.075), (-0.5, 0.1)] {
+            hunter.diet = SignedUnitInterval::try_new(diet).unwrap();
+            // Two tiles cost 1 energy; five seconds of attacking cost 5.
+            let cost = hunting_cost(0.5, 2.0, &hunter, &params).unwrap();
+            assert!((cost - expected_cost).abs() < 1e-6);
+        }
+        // At 70 energy spent, the 60-energy yield loses; the 80-energy yield pays.
+        assert!(hunting_cost(0.5, 130.0, &hunter, &params).is_none());
+        hunter.diet = SignedUnitInterval::try_new(-1.0).unwrap();
+        assert!(hunting_cost(0.5, 130.0, &hunter, &params).is_some());
+        assert!(hunting_cost(0.5, 150.0, &hunter, &params).is_none());
+    }
+
+    #[test]
+    fn only_carnivorous_creatures_hunt_or_attack_even_with_a_negative_aggression_threshold() {
+        for diet in [-1.0, 0.0, 0.5, 1.0] {
+            let params = SimParams {
+                min_aggression: -1.0,
+                ..default()
+            };
+            let mut attacker_genes = genes();
+            attacker_genes.diet = SignedUnitInterval::try_new(diet).unwrap();
+            assert_eq!(
+                hunting_cost(0.5, 0.0, &attacker_genes, &params).is_some(),
+                diet < 0.0
+            );
+            let mut app = app_with_time(1.0);
+            app.add_systems(Update, attack);
+            let attacker = app
+                .world_mut()
+                .spawn(spawn_creature(
+                    GridPos(IVec2::ZERO),
+                    attacker_genes,
+                    &params,
+                    &mut rand::rng(),
+                ))
+                .id();
+            let target = app.world_mut().spawn(test_creature(GridPos(IVec2::X))).id();
+            app.insert_resource(params);
+
+            app.update();
+            assert_eq!(
+                app.world().get::<Stats>(attacker).unwrap().energy < 100.0,
+                diet < 0.0
+            );
+            assert_eq!(
+                app.world().get::<Stats>(target).unwrap().energy,
+                if diet < 0.0 { 80.0 } else { 100.0 }
+            );
+        }
+    }
+
+    #[test]
+    fn startup_scatters_the_configured_population_with_bounded_genes() {
+        for count in [0, 32] {
+            let params = SimParams {
+                initial_creature_count: count,
+                speed_min: 2.0,
+                speed_max: 3.0,
+                size_min: 0.2,
+                size_max: 0.3,
+                vision_radius_min: 6,
+                vision_radius_max: 8,
+                attack_min: 3.0,
+                attack_max: 4.0,
+                diet_min: -0.6,
+                diet_max: -0.4,
+                ..default()
+            };
+            let mut app = App::new();
+            app.insert_resource(params).add_systems(Startup, spawn);
+            app.update();
+
+            let mut query = app
+                .world_mut()
+                .query_filtered::<(&GridPos, &WorldPos, &Genes, &Stats), With<Creature>>();
+            let params = app.world().resource::<SimParams>();
+            assert_eq!(query.iter(app.world()).count(), count as usize);
+            for (grid, pos, genes, stats) in query.iter(app.world()) {
+                assert!(in_bounds(grid.0));
+                assert_eq!(pos.0, grid_to_world(grid.0));
+                assert_genes_in_bounds(genes, params);
+                assert!(
+                    params
+                        .reproduction_tick
+                        .contains(&stats.reproduction_ticks_remaining)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mutation_keeps_random_genes_within_configured_bounds() {
+        use rand::SeedableRng;
+
+        let mut params = SimParams {
+            speed_min: 2.0,
+            speed_max: 3.0,
+            size_min: 0.2,
+            size_max: 0.3,
+            vision_radius_min: 6,
+            vision_radius_max: 8,
+            attack_min: 3.0,
+            attack_max: 4.0,
+            diet_min: 0.4,
+            diet_max: 0.6,
+            gene_pick_probability: UnitInterval::try_new(1.0).unwrap(),
+            ..default()
+        };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        for factor in [0.0, 1.0] {
+            params.gene_mutation_factor = UnitInterval::try_new(factor).unwrap();
+            let mut genes = Genes::random(&mut rng, &params);
+            for _ in 0..128 {
+                genes = genes.mutate(&mut rng, &params);
+                assert_genes_in_bounds(&genes, &params);
+            }
+        }
+    }
+
     #[test]
     fn creature_sprite_tracks_its_world_position_without_a_spawn_offset() {
         let mut app = App::new();
         app.add_plugins(TransformPlugin).add_systems(Update, update);
         let cell = IVec2::splat(GRID_SIZE - 1);
-        let creature = app
-            .world_mut()
-            .spawn(spawn_creature(GridPos(cell), genes()))
-            .id();
+        let creature = app.world_mut().spawn(test_creature(GridPos(cell))).id();
         assert_eq!(
             app.world().get::<WorldPos>(creature).unwrap().0,
             grid_to_world(cell)
@@ -354,10 +763,7 @@ mod tests {
         let mut app = app_with_time(1.0);
         app.add_systems(Update, (start_step, advance).chain());
         let cell = IVec2::new(12, 34);
-        let newborn = app
-            .world_mut()
-            .spawn(spawn_creature(GridPos(cell), genes()))
-            .id();
+        let newborn = app.world_mut().spawn(test_creature(GridPos(cell))).id();
         app.world_mut().get_mut::<Facing>(newborn).unwrap().0 = Some(IVec2::X);
 
         for corner in [
@@ -367,10 +773,7 @@ mod tests {
             IVec2::splat(GRID_SIZE - 1),
         ] {
             for dir in [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y] {
-                let creature = app
-                    .world_mut()
-                    .spawn(spawn_creature(GridPos(corner), genes()))
-                    .id();
+                let creature = app.world_mut().spawn(test_creature(GridPos(corner))).id();
                 app.world_mut().get_mut::<Facing>(creature).unwrap().0 = Some(dir);
             }
         }
@@ -402,12 +805,12 @@ mod tests {
         for cell in [IVec2::ZERO, IVec2::new(42, 60), IVec2::splat(GRID_SIZE - 1)] {
             let mut app = App::new();
             app.init_resource::<SimParams>()
-                .insert_resource(Counter(SimParams::default().reproduction_tick.get()))
                 .add_systems(Update, reproduce);
-            let parent = app
-                .world_mut()
-                .spawn(spawn_creature(GridPos(cell), genes()))
-                .id();
+            let parent = app.world_mut().spawn(test_creature(GridPos(cell))).id();
+            app.world_mut()
+                .get_mut::<Stats>(parent)
+                .unwrap()
+                .reproduction_ticks_remaining = 1;
             app.update();
 
             let mut query = app
@@ -426,55 +829,151 @@ mod tests {
     }
 
     #[test]
-    fn creature_reaches_and_eats_food_between_tile_centers() {
-        let mut app = app_with_time(0.125);
-        app.add_systems(Update, (facing, start_step, advance, eat).chain());
-        let cell = IVec2::new(30, 40);
-        let creature = app
-            .world_mut()
-            .spawn(spawn_creature(GridPos(cell), genes()))
-            .id();
-        let food_pos = (cell + IVec2::new(3, 2)).as_vec2() * TILE_SZ + Vec2::splat(0.1);
-        let food = app
-            .world_mut()
-            .spawn(food::bundle(food_pos, FoodKind::Plant, 1.0, 1.0))
-            .id();
+    fn spawn_samples_each_countdown_from_the_configured_range() {
+        use rand::SeedableRng;
 
-        for _ in 0..80 {
-            app.update();
-            if app.world().get_entity(food).is_err() {
-                break;
-            }
+        let params = SimParams {
+            reproduction_tick: 2..=4,
+            ..default()
+        };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let mut world = World::new();
+        let mut countdowns = Vec::new();
+        for _ in 0..32 {
+            let creature = world.spawn(spawn_creature(
+                GridPos(IVec2::ZERO),
+                genes(),
+                &params,
+                &mut rng,
+            ));
+            countdowns.push(
+                creature
+                    .get::<Stats>()
+                    .unwrap()
+                    .reproduction_ticks_remaining,
+            );
         }
         assert!(
-            app.world().get_entity(food).is_err(),
-            "creature never reached the food"
+            countdowns
+                .iter()
+                .all(|ticks| params.reproduction_tick.contains(ticks))
         );
-        assert_eq!(app.world().get::<Stats>(creature).unwrap().energy, 110.0);
+        assert!(countdowns.contains(&2));
+        assert!(countdowns.contains(&4));
     }
 
     #[test]
-    fn food_is_consumed_only_once_when_creatures_share_a_tile() {
+    fn creatures_count_down_independently_and_reroll_after_reproducing() {
         let mut app = App::new();
-        app.add_systems(Update, eat);
-        let cell = IVec2::new(10, 20);
-        for _ in 0..2 {
-            app.world_mut()
-                .spawn(spawn_creature(GridPos(cell), genes()));
-        }
-        let food = app
+        app.insert_resource(SimParams {
+            reproduction_tick: 7..=7,
+            reproduction_cost: 25.0,
+            ..default()
+        })
+        .add_systems(Update, reproduce);
+        let parent = app
             .world_mut()
-            .spawn(food::bundle(grid_to_world(cell), FoodKind::Plant, 1.0, 1.0))
+            .spawn(test_creature(GridPos(IVec2::ZERO)))
             .id();
-        app.update();
-
-        let energy: f32 = app
+        let other = app
             .world_mut()
-            .query::<&Stats>()
+            .spawn(test_creature(GridPos(IVec2::ONE)))
+            .id();
+        app.world_mut()
+            .get_mut::<Stats>(parent)
+            .unwrap()
+            .reproduction_ticks_remaining = 2;
+        app.world_mut()
+            .get_mut::<Stats>(other)
+            .unwrap()
+            .reproduction_ticks_remaining = 4;
+
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<Stats>(parent)
+                .unwrap()
+                .reproduction_ticks_remaining,
+            1
+        );
+        assert_eq!(
+            app.world()
+                .get::<Stats>(other)
+                .unwrap()
+                .reproduction_ticks_remaining,
+            3
+        );
+        assert_eq!(app.world().get::<Stats>(parent).unwrap().energy, 100.0);
+        assert_eq!(
+            app.world_mut()
+                .query::<&Creature>()
+                .iter(app.world())
+                .count(),
+            2
+        );
+
+        app.update();
+        let stats = app.world().get::<Stats>(parent).unwrap();
+        assert_eq!(stats.reproduction_ticks_remaining, 7);
+        assert_eq!(stats.energy, 75.0);
+        let stats = app.world().get::<Stats>(other).unwrap();
+        assert_eq!(stats.reproduction_ticks_remaining, 2);
+        assert_eq!(stats.energy, 100.0);
+        let mut query = app
+            .world_mut()
+            .query_filtered::<(Entity, &Stats), With<Creature>>();
+        assert_eq!(query.iter(app.world()).count(), 3);
+        let (_, newborn) = query
             .iter(app.world())
-            .map(|s| s.energy)
-            .sum();
-        assert_eq!(energy, 210.0);
-        assert!(app.world().get_entity(food).is_err());
+            .find(|(entity, _)| *entity != parent && *entity != other)
+            .unwrap();
+        assert_eq!(newborn.reproduction_ticks_remaining, 7);
+        assert_eq!(newborn.energy, 100.0);
+
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<Stats>(parent)
+                .unwrap()
+                .reproduction_ticks_remaining,
+            6
+        );
+    }
+
+    #[test]
+    fn reproduction_requires_strictly_positive_energy_after_paying_the_cost() {
+        for energy in [0.0, 49.0, 50.0, 51.0] {
+            let mut app = App::new();
+            app.init_resource::<SimParams>()
+                .add_systems(Update, (reproduce, die).chain());
+            let parent = app
+                .world_mut()
+                .spawn(test_creature(GridPos(IVec2::ZERO)))
+                .id();
+            {
+                let mut stats = app.world_mut().get_mut::<Stats>(parent).unwrap();
+                stats.energy = energy;
+                stats.reproduction_ticks_remaining = 1;
+            }
+
+            app.update();
+            let creatures = app
+                .world_mut()
+                .query::<&Creature>()
+                .iter(app.world())
+                .count();
+            let carcasses = app.world_mut().query::<&Food>().iter(app.world()).count();
+            if energy > 50.0 {
+                assert_eq!(creatures, 2);
+                assert_eq!(carcasses, 0);
+                let stats = app.world().get::<Stats>(parent).unwrap();
+                assert_eq!(stats.energy, 1.0);
+                assert!((800..=1200).contains(&stats.reproduction_ticks_remaining));
+            } else {
+                assert_eq!(creatures, 0);
+                assert_eq!(carcasses, 1);
+                assert!(app.world().get::<Creature>(parent).is_none());
+            }
+        }
     }
 }
