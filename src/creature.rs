@@ -45,10 +45,9 @@ impl Genes {
         };
 
         Self {
-            /* TODO: move min / max fine-tuning to sim::SimParams */
-            speed: one(self.speed, f, 0.1, 10.0),
-            size: one(self.size, f, 0.05, 0.95),
-            vision_radius: one(self.vision_radius as f32, f, 4 as f32, GRID_SIZE as f32) as u32,
+            speed: one(self.speed, f, 0.1, params.speed_max),
+            size: one(self.size, f, 0.05, params.size_max),
+            vision_radius: one(self.vision_radius as f32, f, 4 as f32, params.vision_radius_max as f32) as u32,
             diet: SignedUnitInterval::try_new(
                 one(self.diet.into_inner() as f32, f, -1.0, 1.0).into(),
             )
@@ -175,16 +174,16 @@ fn metabolize(
 
         let moving = if moving { 1.0 } else { 0.0 };
 
-        /* TODO: possibly a better abstraction for calculating cost of particular
-         * characterestics / stats? */
+        let s = genes.size / params.size_max;
+        let v = genes.speed / params.speed_max;
+        let r = genes.vision_radius as f32 / params.vision_radius_max as f32;
 
-        let size_cost = genes.size.powf(3.0) * params.base_cost;
-        let speed_cost = genes.speed.powf(2.0) * moving;
-        let vision_cost = genes.vision_radius as f32 * 0.05;
+        let upkeep   = params.w_size   * s.powi(3);
+        let movement = params.w_move   * moving * s * v * v;
+        let vision   = params.w_vision * r * r;
 
-        let cost = size_cost + speed_cost + vision_cost;
-
-        stats.energy -= (time.delta_secs() * cost).max(0.0);
+        let cost = params.base_cost * (upkeep + movement + vision);
+        stats.energy -= time.delta_secs() * cost;
     }
 }
 
