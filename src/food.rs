@@ -1,12 +1,10 @@
 use bevy::prelude::*;
 
-use crate::GRID_SIZE;
 use crate::creature::{CreatureSimulation, WorldPos};
 use crate::ranged::UnitInterval;
 use crate::sim::SimParams;
 use crate::worldgen::WorldGrid;
-use crate::{grid_to_world, world_to_grid};
-use rand::RngExt;
+use crate::world_to_grid;
 
 #[derive(Clone, Copy)]
 pub enum FoodKind {
@@ -65,12 +63,10 @@ fn decay(
     }
 }
 
-fn decompose(mut commands: Commands, q: Query<(Entity, &FoodDetails, &WorldPos), With<Food>>) {
-    let mut rng = rand::rng();
-    for (entity, details, pos) in &q {
+fn decompose(mut commands: Commands, q: Query<(Entity, &FoodDetails), With<Food>>) {
+    for (entity, details) in &q {
         if details.freshness.into_inner() <= 0.0 {
             commands.entity(entity).despawn();
-            
         }
     }
 }
