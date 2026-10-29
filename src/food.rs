@@ -2,11 +2,11 @@ use bevy::prelude::*;
 
 use crate::GRID_SIZE;
 use crate::creature::{CreatureSimulation, WorldPos};
+use crate::ranged::UnitInterval;
 use crate::sim::SimParams;
 use crate::worldgen::WorldGrid;
 use crate::{grid_to_world, world_to_grid};
 use rand::RngExt;
-use crate::ranged::UnitInterval;
 
 #[derive(Clone, Copy)]
 pub enum FoodKind {
@@ -41,8 +41,6 @@ pub struct FoodDetails {
     digestive efficiency of that creature at consuming the food's kind */
     pub quality: f32,
 
-    /* TODO: an explicit range from [-1, 1] for freshness as a newtype,
-     * the nutype crate seems interesting for this */
     /* TODO: visualize freshness, lerp towards gray, ie.: -1 freshness (stale) is gray */
     pub freshness: UnitInterval,
     pub kind: FoodKind,
@@ -138,7 +136,7 @@ mod tests {
                 grid_to_world(IVec2::ZERO),
                 FoodKind::Plant,
                 1.0,
-                -1.0,
+                UnitInterval::try_new(0.0).unwrap(),
             ))
             .id();
         app.update();
@@ -150,7 +148,7 @@ mod tests {
         assert!(query.iter(app.world()).count() <= 2);
         for (pos, details) in query.iter(app.world()) {
             assert!(matches!(details.kind, FoodKind::Plant));
-            assert!(details.freshness > -1.0);
+            assert!(details.freshness.into_inner() > 0.0);
             assert_eq!(pos.0, grid_to_world(world_to_grid(pos.0)));
         }
     }
@@ -161,11 +159,21 @@ mod tests {
         app.add_systems(Update, decompose);
         let carcass = app
             .world_mut()
-            .spawn(bundle(Vec2::ZERO, FoodKind::Carcass, 1.0, -1.0))
+            .spawn(bundle(
+                Vec2::ZERO,
+                FoodKind::Carcass,
+                1.0,
+                UnitInterval::try_new(0.0).unwrap(),
+            ))
             .id();
         let plant = app
             .world_mut()
-            .spawn(bundle(Vec2::ZERO, FoodKind::Plant, 1.0, 0.0))
+            .spawn(bundle(
+                Vec2::ZERO,
+                FoodKind::Plant,
+                1.0,
+                UnitInterval::try_new(1.0).unwrap(),
+            ))
             .id();
         app.update();
 
