@@ -5,6 +5,7 @@ use rand::RngExt;
 use crate::food::{FoodKind, bundle};
 use crate::ranged::UnitInterval;
 use crate::{GRID_SIZE, TILE_SZ, grid_to_world};
+use crate::sim::SimParams;
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -294,7 +295,23 @@ fn spawn_world(
     commands.insert_resource(grid);
 }
 
+<<<<<<< HEAD
 fn spawn_plants(mut commands: Commands, world: Res<WorldGrid>) {
+=======
+fn spawn_plants(
+    mut commands: Commands,
+    world: Res<WorldGrid>,
+    mut tick: Local<u32>,
+    params: Res<SimParams>,
+) {
+    let should_spawn = *tick % params.plant_regrow_tick == 0;
+    *tick += 1;
+    if !should_spawn {
+        return;
+    }
+    *tick = 1;
+
+>>>>>>> 41f8558 (stableplants)
     let mut rng = rand::rng();
 
     for y in 0..GRID_SIZE {

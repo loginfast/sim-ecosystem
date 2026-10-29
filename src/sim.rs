@@ -12,6 +12,7 @@ pub struct SimParams {
     pub gene_pick_probability: UnitInterval,
     pub gene_mutation_factor: UnitInterval,
     pub reproduction_tick: RangeInclusive<u32>,
+    pub plant_regrow_tick: u32,
     pub reproduction_cost: f32,
     pub attack_radius: f32,
     pub carcass_quality_multiplier: f32,
@@ -46,9 +47,12 @@ impl Default for SimParams {
             gene_pick_probability: UnitInterval::try_new(0.3).unwrap(),
             gene_mutation_factor: UnitInterval::try_new(0.1).unwrap(),
             reproduction_tick: 800..=1200,
+            plant_regrow_tick: 1000,
             reproduction_cost: 50.0,
             attack_radius: 3.0,
             carcass_quality_multiplier: 40.0,
+
+
 
             speed_min: 0.1,
             speed_max: 10.0,
