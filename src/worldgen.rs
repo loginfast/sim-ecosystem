@@ -294,7 +294,16 @@ fn spawn_world(
     commands.insert_resource(grid);
 }
 
-fn spawn_plants(mut commands: Commands, world: Res<WorldGrid>) {
+fn spawn_plants(
+    mut commands: Commands,
+    world: Res<WorldGrid>,
+    mut tick: Local<u32>,
+) {
+    let should_spawn = *tick % 5000 == 0;
+    *tick += 1;
+    if !should_spawn {
+        return;
+    }
     let mut rng = rand::rng();
 
     for y in 0..GRID_SIZE {
@@ -332,7 +341,7 @@ pub struct WorldGenPlugin;
 impl Plugin for WorldGenPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_world)
-            .add_systems(PostStartup, spawn_plants);
+            .add_systems(FixedUpdate, spawn_plants);
     }
 }
 

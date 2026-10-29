@@ -5,6 +5,7 @@ use crate::creature::{CreatureSimulation, WorldPos};
 use crate::ranged::UnitInterval;
 use crate::sim::SimParams;
 use crate::worldgen::WorldGrid;
+use crate::TILE_SZ;
 use crate::{grid_to_world, world_to_grid};
 use rand::RngExt;
 
