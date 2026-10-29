@@ -346,7 +346,8 @@ pub struct WorldGenPlugin;
 impl Plugin for WorldGenPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_world)
-            .add_systems(PostStartup, spawn_plants);
+            .add_systems(PostStartup, spawn_plants)
+            .add_systems(FixedUpdate, spawn_plants);
     }
 }
 

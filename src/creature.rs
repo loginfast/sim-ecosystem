@@ -32,7 +32,58 @@ pub struct Genes {
     pub attack: f32,
 }
 
+// Five genes with twelve ordered thresholds each fit in a u64. Ten differing
+// thresholds tolerate ordinary offspring mutations without protecting all prey.
+const GENE_HASH_BITS: u32 = 12;
+const KIN_HASH_DISTANCE: u32 = 10;
+
+#[derive(Clone, Copy)]
+struct GeneHash(u64);
+
+impl GeneHash {
+    fn distance(self, other: Self) -> u32 {
+        (self.0 ^ other.0).count_ones()
+    }
+
+    fn is_kin(self, other: Self) -> bool {
+        self.distance(other) <= KIN_HASH_DISTANCE
+    }
+}
+
 impl Genes {
+    /// A locality-preserving hash: each normalized gene sets a prefix of bits.
+    /// Unlike hashing float bytes, small numeric mutations change few bits;
+    /// unlike comparing genes to their mean, absolute trait values are retained.
+    /// PS: thanks claude :>
+    fn perceptual_hash(&self, params: &SimParams) -> GeneHash {
+        let traits = [
+            (self.speed, params.speed_min, params.speed_max),
+            (self.size, params.size_min, params.size_max),
+            (
+                self.diet.into_inner() as f32,
+                params.diet_min,
+                params.diet_max,
+            ),
+            (
+                self.vision_radius as f32,
+                params.vision_radius_min as f32,
+                params.vision_radius_max as f32,
+            ),
+            (self.attack, params.attack_min, params.attack_max),
+        ];
+        let mut hash = 0;
+        for (value, min, max) in traits {
+            let normalized = if max > min {
+                ((value - min) / (max - min)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let bits = (normalized * GENE_HASH_BITS as f32).round() as u32;
+            hash = (hash << GENE_HASH_BITS) | ((1_u64 << bits) - 1);
+        }
+        GeneHash(hash)
+    }
+
     fn random(rng: &mut impl Rng, params: &SimParams) -> Self {
         Self {
             speed: rng.random_range(params.speed_min..=params.speed_max),
@@ -103,8 +154,8 @@ impl Plugin for CreaturePlugin {
                 (
                     facing, start_step, advance, attack, eat, metabolize, reproduce, die,
                 )
-                    .chain()
-                    .in_set(CreatureSimulation),
+                .chain()
+                .in_set(CreatureSimulation),
             );
     }
 }
@@ -147,7 +198,10 @@ fn attack(
     let dt = time.delta_secs();
     let r2 = (params.attack_radius * TILE_SZ).powf(2.0);
 
-    let snap: Vec<(Entity, Vec2, f32)> = q.iter().map(|(e, p, g, _)| (e, p.0, g.size)).collect();
+    let snap: Vec<_> = q
+        .iter()
+        .map(|(e, p, g, _)| (e, p.0, g.size, g.perceptual_hash(&params)))
+        .collect();
 
     let mut damage: Vec<(Entity, f32)> = Vec::new();
 
@@ -159,10 +213,11 @@ fn attack(
             continue;
         }
 
+        let kin_hash = genes.perceptual_hash(&params);
         let victim = snap
             .iter()
-            .filter(|(e, ..)| *e != me)
-            .map(|(e, p, size)| (*e, *size, (*p - pos.0).length_squared()))
+            .filter(|(e, _, _, hash)| *e != me && !kin_hash.is_kin(*hash))
+            .map(|(e, p, size, _)| (*e, *size, (*p - pos.0).length_squared()))
             .filter(|(_, _, d2)| *d2 < r2)
             .min_by(|a, b| a.2.total_cmp(&b.2));
 
@@ -193,9 +248,15 @@ fn facing(
     qfood: Query<(&WorldPos, &FoodDetails), With<Food>>,
     params: Res<SimParams>,
 ) {
+    let prey_snapshot: Vec<_> = qprey
+        .iter()
+        .map(|(e, pos, genes)| (e, *pos, genes.size, genes.perceptual_hash(&params)))
+        .collect();
+
     for (me, mut facing, gpos, pos, genes) in &mut qcreature {
         let r = genes.vision_radius as f32;
         let c_move = move_cost_per_tile(genes, &params);
+        let kin_hash = genes.perceptual_hash(&params);
 
         /* TODO: move cost determination to a new function
          * decoupled from path-finding */
@@ -211,13 +272,13 @@ fn facing(
             Some((*food_pos, dist, cost))
         };
 
-        let hunt = |(prey_pos, prey_genes): (&WorldPos, &Genes)| -> Option<(WorldPos, f32, f64)> {
+        let hunt = |prey_pos: &WorldPos, prey_size: f32| -> Option<(WorldPos, f32, f64)> {
             let d = (prey_pos.0 - pos.0).abs();
             let dist = (d.x + d.y) / TILE_SZ;
             if dist > r {
                 return None;
             }
-            let cost = hunting_cost(prey_genes.size, dist, genes, &params)?;
+            let cost = hunting_cost(prey_size, dist, genes, &params)?;
             Some((*prey_pos, dist, cost))
         };
 
@@ -227,11 +288,10 @@ fn facing(
             .filter(|(_, d, _)| *d <= r)
             .min_by(|a, b| a.2.total_cmp(&b.2));
 
-        let prey = qprey
+        let prey = prey_snapshot
             .iter()
-            .filter(|(e, ..)| *e != me)
-            .map(|(_, pos, genes)| (pos, genes))
-            .filter_map(hunt)
+            .filter(|(e, _, _, hash)| *e != me && !kin_hash.is_kin(*hash))
+            .filter_map(|(_, pos, size, _)| hunt(pos, *size))
             .min_by(|a, b| a.2.total_cmp(&b.2));
 
         let target = match (food, prey) {
@@ -486,7 +546,11 @@ mod tests {
     }
 
     fn test_creature(gpos: GridPos) -> impl Bundle {
-        spawn_creature(gpos, genes(), &SimParams::default(), &mut rand::rng())
+        let params = SimParams {
+            initial_energy_range: 100.0..=100.0,
+            ..default()
+        };
+        spawn_creature(gpos, genes(), &params, &mut rand::rng())
     }
 
     fn app_with_time(seconds: f32) -> App {
@@ -510,6 +574,301 @@ mod tests {
     }
 
     #[test]
+    fn kin_hash_preserves_distance_for_every_gene_including_signed_diet() {
+        let params = SimParams::default();
+        let low = Genes {
+            speed: params.speed_min,
+            size: params.size_min,
+            diet: SignedUnitInterval::try_new(-1.0).unwrap(),
+            vision_radius: params.vision_radius_min,
+            attack: params.attack_min,
+        };
+        let hash = low.perceptual_hash(&params);
+        assert_eq!(hash.distance(hash), 0);
+        for high in [
+            Genes {
+                speed: params.speed_max,
+                ..low
+            },
+            Genes {
+                size: params.size_max,
+                ..low
+            },
+            Genes {
+                diet: SignedUnitInterval::try_new(1.0).unwrap(),
+                ..low
+            },
+            Genes {
+                vision_radius: params.vision_radius_max,
+                ..low
+            },
+            Genes {
+                attack: params.attack_max,
+                ..low
+            },
+        ] {
+            let other = high.perceptual_hash(&params);
+            assert_eq!(hash.distance(other), GENE_HASH_BITS);
+            assert_eq!(other.distance(hash), GENE_HASH_BITS);
+            assert!(!hash.is_kin(other));
+        }
+    }
+
+    #[test]
+    fn kin_hash_tolerates_default_mutations_even_when_every_gene_is_picked() {
+        use rand::SeedableRng;
+
+        let mut params = SimParams {
+            gene_pick_probability: UnitInterval::try_new(1.0).unwrap(),
+            ..default()
+        };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let mut saw_difference = false;
+        for _ in 0..1024 {
+            let parent = Genes::random(&mut rng, &params);
+            let child = parent.mutate(&mut rng, &params);
+            let a = parent.perceptual_hash(&params);
+            let b = child.perceptual_hash(&params);
+            saw_difference |= a.distance(b) > 0;
+            assert!(a.is_kin(b));
+            assert!(b.is_kin(a));
+        }
+        assert!(saw_difference);
+
+        // Constant traits carry no distinguishing information and must not divide by zero.
+        params.speed_max = params.speed_min;
+        params.size_max = params.size_min;
+        params.diet_max = params.diet_min;
+        params.vision_radius_max = params.vision_radius_min;
+        params.attack_max = params.attack_min;
+        let parent = Genes::random(&mut rng, &params);
+        assert_eq!(parent.perceptual_hash(&params).0, 0);
+        assert!(
+            parent
+                .perceptual_hash(&params)
+                .is_kin(parent.mutate(&mut rng, &params).perceptual_hash(&params))
+        );
+    }
+
+    #[test]
+    fn kin_parent_and_newborn_do_not_attack_each_other_or_spend_attack_energy() {
+        let params = SimParams {
+            initial_energy_range: 100.0..=100.0,
+            gene_pick_probability: UnitInterval::try_new(1.0).unwrap(),
+            ..default()
+        };
+        let mut app = app_with_time(1.0);
+        app.add_systems(Update, reproduce)
+            .add_systems(FixedUpdate, (attack, die).chain());
+        let parent_genes = Genes {
+            diet: SignedUnitInterval::try_new(-1.0).unwrap(),
+            ..genes()
+        };
+        let parent = app
+            .world_mut()
+            .spawn(spawn_creature(
+                GridPos(IVec2::splat(10)),
+                parent_genes,
+                &params,
+                &mut rand::rng(),
+            ))
+            .id();
+        app.world_mut()
+            .get_mut::<Stats>(parent)
+            .unwrap()
+            .reproduction_ticks_remaining = 1;
+        app.insert_resource(params);
+        app.update();
+        let before: Vec<_> = app
+            .world_mut()
+            .query_filtered::<(Entity, &Stats), With<Creature>>()
+            .iter(app.world())
+            .map(|(e, s)| (e, s.energy))
+            .collect();
+        assert_eq!(before.len(), 2);
+        for _ in 0..16 {
+            app.world_mut().run_schedule(FixedUpdate);
+        }
+        for (entity, energy) in before {
+            assert_eq!(app.world().get::<Stats>(entity).unwrap().energy, energy);
+        }
+    }
+
+    #[test]
+    fn kin_attack_skips_nearer_relatives_but_still_damages_unrelated_prey() {
+        let params = SimParams {
+            initial_energy_range: 100.0..=100.0,
+            ..default()
+        };
+        let hunter = Genes {
+            diet: SignedUnitInterval::try_new(-1.0).unwrap(),
+            ..genes()
+        };
+        let relative = Genes {
+            speed: hunter.speed * 1.05,
+            ..hunter
+        };
+        let prey = Genes {
+            diet: SignedUnitInterval::try_new(1.0).unwrap(),
+            ..hunter
+        };
+        let mut app = app_with_time(1.0);
+        app.add_systems(Update, attack);
+        let mut entities = Vec::new();
+        for (offset, genes) in [
+            (IVec2::ZERO, hunter),
+            (IVec2::X, relative),
+            (IVec2::Y * 2, prey),
+        ] {
+            entities.push(
+                app.world_mut()
+                    .spawn(spawn_creature(
+                        GridPos(IVec2::splat(10) + offset),
+                        genes,
+                        &params,
+                        &mut rand::rng(),
+                    ))
+                    .id(),
+            );
+        }
+        let expected_hunter_energy = 100.0 - attack_burn(&hunter, &params);
+        let expected_relative_energy = 100.0 - attack_burn(&relative, &params);
+        app.insert_resource(params);
+        app.update();
+        assert_eq!(
+            app.world().get::<Stats>(entities[0]).unwrap().energy,
+            expected_hunter_energy
+        );
+        assert_eq!(
+            app.world().get::<Stats>(entities[1]).unwrap().energy,
+            expected_relative_energy
+        );
+        assert_eq!(
+            app.world().get::<Stats>(entities[2]).unwrap().energy,
+            100.0 - (hunter.attack + relative.attack) / prey.size
+        );
+    }
+
+    #[test]
+    fn kin_facing_skips_nearer_relatives_for_food_or_unrelated_prey() {
+        for include_prey in [false, true] {
+            let params = SimParams::default();
+            let hunter = Genes {
+                diet: SignedUnitInterval::try_new(-1.0).unwrap(),
+                ..genes()
+            };
+            let cell = IVec2::splat(10);
+            let mut app = App::new();
+            app.add_systems(Update, facing);
+            let entity = app
+                .world_mut()
+                .spawn(spawn_creature(
+                    GridPos(cell),
+                    hunter,
+                    &params,
+                    &mut rand::rng(),
+                ))
+                .id();
+            for (offset, genes) in [
+                (
+                    IVec2::Y,
+                    Genes {
+                        speed: hunter.speed * 1.05,
+                        ..hunter
+                    },
+                ),
+                (
+                    IVec2::X * 2,
+                    Genes {
+                        diet: SignedUnitInterval::try_new(1.0).unwrap(),
+                        ..hunter
+                    },
+                ),
+            ]
+            .into_iter()
+            .take(if include_prey { 2 } else { 1 })
+            {
+                app.world_mut().spawn(spawn_creature(
+                    GridPos(cell + offset),
+                    genes,
+                    &params,
+                    &mut rand::rng(),
+                ));
+            }
+            app.world_mut().spawn(food::bundle(
+                grid_to_world(cell + IVec2::X * 3),
+                FoodKind::Carcass,
+                0.05,
+                UnitInterval::try_new(1.0).unwrap(),
+            ));
+            app.insert_resource(params);
+            app.update();
+            assert_eq!(app.world().get::<Facing>(entity).unwrap().0, Some(IVec2::X));
+        }
+    }
+
+    #[test]
+    fn kin_filter_preserves_the_diet_and_hunting_cost_tradeoff() {
+        for (diet, expected_direction) in [
+            (-1.0, IVec2::Y),
+            (-0.5, IVec2::Y),
+            (-0.1, IVec2::X),
+            (1.0, IVec2::X),
+        ] {
+            let params = SimParams {
+                base_cost: 1.0,
+                size_max: 1.0,
+                speed_max: 1.0,
+                attack_max: 10.0,
+                w_size: 0.0,
+                w_vision: 0.0,
+                w_move: 1.0,
+                w_attack: 1.0,
+                ..default()
+            };
+            let hunter = Genes {
+                diet: SignedUnitInterval::try_new(diet).unwrap(),
+                ..genes()
+            };
+            let prey = Genes {
+                diet: SignedUnitInterval::try_new(1.0).unwrap(),
+                vision_radius: params.vision_radius_max,
+                ..hunter
+            };
+            let cell = IVec2::splat(10);
+            let mut app = App::new();
+            app.add_systems(Update, facing);
+            let entity = app
+                .world_mut()
+                .spawn(spawn_creature(
+                    GridPos(cell),
+                    hunter,
+                    &params,
+                    &mut rand::rng(),
+                ))
+                .id();
+            app.world_mut().spawn(spawn_creature(
+                GridPos(cell + IVec2::Y * 2),
+                prey,
+                &params,
+                &mut rand::rng(),
+            ));
+            app.world_mut().spawn(food::bundle(
+                grid_to_world(cell + IVec2::X * 2),
+                FoodKind::Plant,
+                8.0,
+                UnitInterval::try_new(1.0).unwrap(),
+            ));
+            app.insert_resource(params);
+            app.update();
+            assert_eq!(
+                app.world().get::<Facing>(entity).unwrap().0,
+                Some(expected_direction)
+            );
+        }
+    }
+
+    #[test]
     fn eating_scales_energy_by_diet_and_leaves_indigestible_food() {
         for (diet, plant_gain, carcass_gain) in [
             (-1.0, 0.0, 6.0),
@@ -526,12 +885,16 @@ mod tests {
                 app.add_systems(Update, eat);
                 let mut genes = genes();
                 genes.diet = SignedUnitInterval::try_new(diet).unwrap();
+                let params = SimParams {
+                    initial_energy_range: 100.0..=100.0,
+                    ..default()
+                };
                 let creature = app
                     .world_mut()
                     .spawn(spawn_creature(
                         GridPos(IVec2::ZERO),
                         genes,
-                        &SimParams::default(),
+                        &params,
                         &mut rand::rng(),
                     ))
                     .id();
@@ -545,6 +908,7 @@ mod tests {
                     ))
                     .id();
 
+                app.insert_resource(params);
                 app.update();
                 assert_eq!(
                     app.world().get::<Stats>(creature).unwrap().energy,
@@ -627,6 +991,7 @@ mod tests {
         for diet in [-1.0, 0.0, 0.5, 1.0] {
             let params = SimParams {
                 min_aggression: -1.0,
+                initial_energy_range: 100.0..=100.0,
                 ..default()
             };
             let mut attacker_genes = genes();
@@ -646,7 +1011,20 @@ mod tests {
                     &mut rand::rng(),
                 ))
                 .id();
-            let target = app.world_mut().spawn(test_creature(GridPos(IVec2::X))).id();
+            let prey = Genes {
+                speed: params.speed_max,
+                vision_radius: params.vision_radius_max,
+                ..genes()
+            };
+            let target = app
+                .world_mut()
+                .spawn(spawn_creature(
+                    GridPos(IVec2::X),
+                    prey,
+                    &params,
+                    &mut rand::rng(),
+                ))
+                .id();
             app.insert_resource(params);
 
             app.update();
@@ -867,6 +1245,7 @@ mod tests {
         app.insert_resource(SimParams {
             reproduction_tick: 7..=7,
             reproduction_cost: 25.0,
+            initial_energy_range: 100.0..=100.0,
             ..default()
         })
         .add_systems(Update, reproduce);
