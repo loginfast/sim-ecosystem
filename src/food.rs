@@ -29,7 +29,7 @@ impl Plugin for FoodPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             FixedUpdate,
-            (decay, decompose).chain().before(CreatureSimulation),
+            (decay, respawn_plants, decompose).chain().before(CreatureSimulation),
         );
     }
 }
@@ -65,6 +65,40 @@ fn decay(
     }
 }
 
+fn respawn_plants(
+    q: Query<&WorldPos, With<Food>>,
+    mut commands: Commands,
+    mut tick: Local<u32>,
+) {
+    *tick = (*tick + 1) % 500;
+    if *tick != 0 {
+        return;
+    }
+
+    let mut rng = rand::rng();
+    let map_size = GRID_SIZE as f32 * TILE_SZ;
+    for pos in &q {
+        let roll = rng.random::<f32>();
+        let offspring = if roll < 0.6 {
+            1
+        } else if roll < 0.8 {
+            0
+        } else {
+            2
+        };
+        for _ in 0..offspring {
+            let spread = TILE_SZ * 3.0;
+            let offset = Vec2::new(
+                rng.random_range(-spread..spread),
+                rng.random_range(-spread..spread),
+            );
+            let new_pos = (pos.0 + offset).clamp(Vec2::ZERO, Vec2::splat(map_size - 0.01));
+            let quality = rng.random_range(0.5..1.0);
+            let freshness = UnitInterval::try_new(rng.random_range(0.5..1.0)).unwrap();
+            commands.spawn(bundle(new_pos, FoodKind::Plant, quality, freshness));
+        }
+    }
+}
 fn decompose(mut commands: Commands, q: Query<(Entity, &FoodDetails, &WorldPos), With<Food>>) {
     let mut rng = rand::rng();
     for (entity, details, pos) in &q {
