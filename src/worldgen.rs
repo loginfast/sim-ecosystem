@@ -4,8 +4,8 @@ use rand::RngExt;
 
 use crate::food::{FoodKind, bundle};
 use crate::ranged::UnitInterval;
-use crate::{GRID_SIZE, TILE_SZ, grid_to_world};
 use crate::sim::SimParams;
+use crate::{GRID_SIZE, TILE_SZ, grid_to_world};
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -64,8 +64,8 @@ impl Biome {
         match self {
             Biome::Snowy => Color::srgb(0.93, 0.95, 0.98),
             Biome::Desert => Color::srgb(0.92, 0.80, 0.50),
-            Biome::Rainforest => Color::srgb(0.16, 0.50, 0.22),
-            Biome::Grassland => Color::srgb(0.72, 0.78, 0.60),
+            Biome::Rainforest => Color::srgb(0.0706, 0.2157, 0.1490),
+            Biome::Grassland => Color::srgb(0.086, 0.722, 0.353),
         }
     }
 

@@ -52,8 +52,6 @@ impl Default for SimParams {
             attack_radius: 3.0,
             carcass_quality_multiplier: 40.0,
 
-
-
             speed_min: 0.1,
             speed_max: 10.0,
             size_min: 0.05,

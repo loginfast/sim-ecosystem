@@ -70,11 +70,9 @@ fn decompose(mut commands: Commands, q: Query<(Entity, &FoodDetails, &WorldPos),
     for (entity, details, pos) in &q {
         if details.freshness.into_inner() <= 0.0 {
             commands.entity(entity).despawn();
-            
         }
     }
 }
-
 
 pub fn bundle(pos: Vec2, kind: FoodKind, quality: f32, freshness: UnitInterval) -> impl Bundle {
     /* TODO: food size proportional to quality */
