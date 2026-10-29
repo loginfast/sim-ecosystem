@@ -65,10 +65,6 @@ fn decay(
     }
 }
 
-<<<<<<< HEAD
-=======
-
->>>>>>> 41f8558 (stableplants)
 fn decompose(mut commands: Commands, q: Query<(Entity, &FoodDetails, &WorldPos), With<Food>>) {
     let mut rng = rand::rng();
     for (entity, details, pos) in &q {

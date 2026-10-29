@@ -295,9 +295,6 @@ fn spawn_world(
     commands.insert_resource(grid);
 }
 
-<<<<<<< HEAD
-fn spawn_plants(mut commands: Commands, world: Res<WorldGrid>) {
-=======
 fn spawn_plants(
     mut commands: Commands,
     world: Res<WorldGrid>,
@@ -311,7 +308,6 @@ fn spawn_plants(
     }
     *tick = 1;
 
->>>>>>> 41f8558 (stableplants)
     let mut rng = rand::rng();
 
     for y in 0..GRID_SIZE {
