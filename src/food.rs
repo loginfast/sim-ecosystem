@@ -70,37 +70,11 @@ fn decompose(mut commands: Commands, q: Query<(Entity, &FoodDetails, &WorldPos),
     for (entity, details, pos) in &q {
         if details.freshness.into_inner() <= 0.0 {
             commands.entity(entity).despawn();
-            if matches!(details.kind, FoodKind::Plant) {
-                regrow_plants(&mut commands, pos.0, &mut rng);
-            }
+            
         }
     }
 }
 
-fn regrow_plants(commands: &mut Commands, pos: Vec2, rng: &mut impl rand::Rng) {
-    // Preserve the existing odds: 60% one plant, 20% none, 20% two.
-    let roll = rng.random::<f32>();
-    let offspring = if roll < 0.6 {
-        1
-    } else if roll < 0.8 {
-        0
-    } else {
-        2
-    };
-    let cell = world_to_grid(pos);
-    for _ in 0..offspring {
-        let offset = IVec2::new(rng.random_range(-3..=3), rng.random_range(-3..=3));
-        let new_cell = (cell + offset).clamp(IVec2::ZERO, IVec2::splat(GRID_SIZE - 1));
-        let quality = rng.random_range(0.5..1.0);
-        let freshness = UnitInterval::try_new(rng.random_range(0.5..1.0)).unwrap();
-        commands.spawn(bundle(
-            grid_to_world(new_cell),
-            FoodKind::Plant,
-            quality,
-            freshness,
-        ));
-    }
-}
 
 pub fn bundle(pos: Vec2, kind: FoodKind, quality: f32, freshness: UnitInterval) -> impl Bundle {
     /* TODO: food size proportional to quality */
