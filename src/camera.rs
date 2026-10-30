@@ -1,4 +1,4 @@
-use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
+use bevy::input::mouse::{AccumulatedMouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::EguiContexts;
@@ -35,7 +35,7 @@ fn pick_creature(
     creatures: Query<(Entity, &WorldPos), With<Creature>>,
     mut follow: ResMut<Follow>,
 ) {
-    if !mouse.just_pressed(MouseButton::Middle) {
+    if !window.focused || !mouse.just_pressed(MouseButton::Middle) {
         return;
     }
     let Some(cursor) = window.cursor_position() else {
@@ -73,11 +73,24 @@ fn follow_camera(
 }
 
 fn zoom(
-    scroll: Res<AccumulatedMouseScroll>,
+    mut scroll: MessageReader<MouseWheel>,
+    window: Single<Entity, With<PrimaryWindow>>,
     mut projection: Single<&mut Projection, With<Camera2d>>,
     mut contexts: EguiContexts,
 ) {
-    if scroll.delta.y == 0.0 {
+    // Wheel messages carry their window; the accumulated resource mixes all windows.
+    let delta: f32 = scroll
+        .read()
+        .filter(|event| event.window == *window)
+        .map(|event| {
+            let k = match event.unit {
+                MouseScrollUnit::Line => ZOOM_PER_LINE,
+                MouseScrollUnit::Pixel => ZOOM_PER_PIXEL,
+            };
+            k * event.y
+        })
+        .sum();
+    if delta == 0.0 {
         return;
     }
     // UI scrolling must not also zoom the simulation underneath it.
@@ -88,13 +101,8 @@ fn zoom(
         return;
     }
 
-    // Mouse wheels report lines, trackpads report pixels.
-    let k = match scroll.unit {
-        MouseScrollUnit::Line => ZOOM_PER_LINE,
-        MouseScrollUnit::Pixel => ZOOM_PER_PIXEL,
-    };
     if let Projection::Orthographic(ortho) = &mut **projection {
-        ortho.scale = (ortho.scale * (-k * scroll.delta.y).exp()).clamp(ZOOM_MIN, ZOOM_MAX);
+        ortho.scale = (ortho.scale * (-delta).exp()).clamp(ZOOM_MIN, ZOOM_MAX);
     }
 }
 
@@ -103,7 +111,11 @@ fn pan(
     motion: Res<AccumulatedMouseMotion>,
     mut follow: ResMut<Follow>,
     mut camera: Single<&mut Transform, With<Camera2d>>,
+    window: Single<&Window, With<PrimaryWindow>>,
 ) {
+    if !window.focused || window.cursor_position().is_none() {
+        return;
+    }
     let pan_factor = 1.0;
     if mouse.pressed(MouseButton::Right) {
         camera.translation.x -= motion.delta.x * pan_factor;
@@ -111,4 +123,83 @@ fn pan(
         follow.0 = None;
     }
     debug!("panfactpr={}, motion delta={}", pan_factor, motion.delta);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::input::touch::TouchPhase;
+
+    #[test]
+    fn wheel_in_the_evolution_window_does_not_zoom_the_simulation() {
+        let mut app = App::new();
+        app.add_message::<MouseWheel>()
+            .init_resource::<bevy_egui::EguiUserTextures>()
+            .add_systems(Update, zoom);
+        let primary = app
+            .world_mut()
+            .spawn((Window::default(), PrimaryWindow))
+            .id();
+        let graph = app.world_mut().spawn(Window::default()).id();
+        let camera = app.world_mut().spawn(Camera2d).id();
+        for (window, expected) in [(graph, 1.0), (primary, (-ZOOM_PER_LINE).exp())] {
+            app.world_mut().write_message(MouseWheel {
+                unit: MouseScrollUnit::Line,
+                x: 0.0,
+                y: 1.0,
+                window,
+                phase: TouchPhase::Moved,
+            });
+            app.update();
+            let Projection::Orthographic(projection) =
+                app.world().get::<Projection>(camera).unwrap()
+            else {
+                panic!("expected orthographic camera");
+            };
+            assert!((projection.scale - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn dragging_in_another_window_preserves_the_simulation_camera_and_follow_target() {
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<MouseButton>>()
+            .insert_resource(AccumulatedMouseMotion {
+                delta: Vec2::new(20.0, 10.0),
+            })
+            .insert_resource(Follow(Some(Entity::PLACEHOLDER)))
+            .add_systems(Update, pan);
+        let primary = app
+            .world_mut()
+            .spawn((
+                Window {
+                    focused: false,
+                    ..default()
+                },
+                PrimaryWindow,
+            ))
+            .id();
+        app.world_mut().spawn(Window::default());
+        let camera = app.world_mut().spawn(Camera2d).id();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Right);
+        app.update();
+        assert_eq!(
+            app.world().get::<Transform>(camera).unwrap().translation,
+            Vec3::ZERO
+        );
+        assert!(app.world().resource::<Follow>().0.is_some());
+        {
+            let mut window = app.world_mut().get_mut::<Window>(primary).unwrap();
+            window.focused = true;
+            window.set_cursor_position(Some(Vec2::new(100.0, 100.0)));
+        }
+        app.update();
+        assert_eq!(
+            app.world().get::<Transform>(camera).unwrap().translation,
+            Vec3::new(-20.0, 10.0, 0.0)
+        );
+        assert!(app.world().resource::<Follow>().0.is_none());
+    }
 }

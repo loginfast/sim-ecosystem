@@ -6,7 +6,6 @@ use crate::food::{FoodKind, bundle};
 use crate::ranged::UnitInterval;
 use crate::sim::SimParams;
 use crate::{GRID_SIZE, TILE_SZ, grid_to_world};
-use crate::sim::SimParams;
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -398,6 +397,7 @@ mod tests {
             .insert_resource(grassland())
             .insert_resource(SimParams {
                 initial_creature_count: 1,
+                initial_energy_range: 100.0..=100.0,
                 base_cost: 0.0,
                 food_decay_rate: 0.0,
                 ..default()

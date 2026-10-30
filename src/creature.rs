@@ -139,6 +139,18 @@ pub struct Stats {
     pub reproduction_ticks_remaining: u32,
 }
 
+/// A successful reproduction; founders are not counted as births.
+#[derive(Event)]
+pub struct CreatureBorn {
+    pub parent_diet: f32,
+    pub offspring_diet: f32,
+}
+
+#[derive(Event)]
+pub struct CreatureDied {
+    pub diet: f32,
+}
+
 pub struct CreaturePlugin;
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -154,8 +166,8 @@ impl Plugin for CreaturePlugin {
                 (
                     facing, start_step, advance, attack, eat, metabolize, reproduce, die,
                 )
-                .chain()
-                .in_set(CreatureSimulation),
+                    .chain()
+                    .in_set(CreatureSimulation),
             );
     }
 }
@@ -432,6 +444,9 @@ fn die(
 ) {
     for (entity, genes, pos, Stats { energy, .. }) in &q {
         if *energy <= 0.0 {
+            commands.trigger(CreatureDied {
+                diet: genes.diet.into_inner() as f32,
+            });
             let corpse = corpse_food(&p, genes.size);
             commands.spawn(food::bundle(
                 pos.0,
@@ -482,6 +497,10 @@ fn reproduce(
         let genes_ = genes.mutate(&mut rng, &params);
         let gpos_ = GridPos(gpos.0 + pick_direction(&gpos, &mut rng).unwrap_or(IVec2::ZERO));
         commands.spawn(spawn_creature(gpos_, genes_, &params, &mut rng));
+        commands.trigger(CreatureBorn {
+            parent_diet: genes.diet.into_inner() as f32,
+            offspring_diet: genes_.diet.into_inner() as f32,
+        });
     }
 }
 
@@ -1320,9 +1339,25 @@ mod tests {
 
     #[test]
     fn reproduction_requires_strictly_positive_energy_after_paying_the_cost() {
+        #[derive(Resource, Default)]
+        struct Events {
+            births: usize,
+            deaths: usize,
+        }
+
         for energy in [0.0, 49.0, 50.0, 51.0] {
             let mut app = App::new();
             app.init_resource::<SimParams>()
+                .init_resource::<Events>()
+                .add_observer(|event: On<CreatureBorn>, mut events: ResMut<Events>| {
+                    assert_eq!(event.parent_diet, 0.0);
+                    assert_eq!(event.offspring_diet, 0.0);
+                    events.births += 1;
+                })
+                .add_observer(|event: On<CreatureDied>, mut events: ResMut<Events>| {
+                    assert_eq!(event.diet, 0.0);
+                    events.deaths += 1;
+                })
                 .add_systems(Update, (reproduce, die).chain());
             let parent = app
                 .world_mut()
@@ -1341,12 +1376,20 @@ mod tests {
                 .iter(app.world())
                 .count();
             let carcasses = app.world_mut().query::<&Food>().iter(app.world()).count();
+            let events = app.world().resource::<Events>();
+            assert_eq!(events.births, usize::from(energy > 50.0));
+            assert_eq!(events.deaths, usize::from(energy <= 50.0));
             if energy > 50.0 {
                 assert_eq!(creatures, 2);
                 assert_eq!(carcasses, 0);
                 let stats = app.world().get::<Stats>(parent).unwrap();
                 assert_eq!(stats.energy, 1.0);
-                assert!((800..=1200).contains(&stats.reproduction_ticks_remaining));
+                assert!(
+                    app.world()
+                        .resource::<SimParams>()
+                        .reproduction_tick
+                        .contains(&stats.reproduction_ticks_remaining)
+                );
             } else {
                 assert_eq!(creatures, 0);
                 assert_eq!(carcasses, 1);

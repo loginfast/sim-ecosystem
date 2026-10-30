@@ -44,6 +44,6 @@ fn inspector(
 fn params_panel(mut contexts: EguiContexts, mut params: ResMut<SimParams>) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::Window::new("Sim params").show(ctx, |ui| {
-        ui.add(egui::Slider::new(&mut params.base_cost, 0.0..=5.0).text("base cost"));
+        ui.add(egui::Slider::new(&mut params.base_cost, 1.0..=20.0).text("base cost"));
     });
 }

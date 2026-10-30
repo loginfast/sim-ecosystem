@@ -42,13 +42,13 @@ pub struct SimParams {
 impl Default for SimParams {
     fn default() -> Self {
         Self {
-            initial_creature_count: 100,
+            initial_creature_count: 400,
             initial_energy_range: 80.0..=150.0,
-            base_cost: 0.8,
+            base_cost: 5.0,
             food_decay_rate: 0.05,
             gene_pick_probability: UnitInterval::try_new(0.3).unwrap(),
             gene_mutation_factor: UnitInterval::try_new(0.1).unwrap(),
-            reproduction_tick: 800..=1200,
+            reproduction_tick: 1800..=2700,
             plant_regrow_tick: 1000,
             reproduction_cost: 50.0,
             attack_radius: 3.0,
