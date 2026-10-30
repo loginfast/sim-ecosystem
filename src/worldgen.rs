@@ -1,13 +1,15 @@
 use bevy::prelude::*;
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
+use rand::RngExt;
 
+use crate::food::{FoodKind, bundle};
+use crate::ranged::UnitInterval;
+use crate::sim::SimParams;
 use crate::{GRID_SIZE, TILE_SZ, grid_to_world};
 
 // ---------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------
-
-const SEED: u32 = 1337;
 
 // Lower frequency = bigger biome regions.
 const TEMP_FREQUENCY: f64 = 0.02;
@@ -42,7 +44,12 @@ pub enum Biome {
 }
 
 impl Biome {
-    const ALL: [Biome; 4] = [Biome::Snowy, Biome::Desert, Biome::Rainforest, Biome::Grassland];
+    const ALL: [Biome; 4] = [
+        Biome::Snowy,
+        Biome::Desert,
+        Biome::Rainforest,
+        Biome::Grassland,
+    ];
 
     fn index(self) -> usize {
         match self {
@@ -57,8 +64,26 @@ impl Biome {
         match self {
             Biome::Snowy => Color::srgb(0.93, 0.95, 0.98),
             Biome::Desert => Color::srgb(0.92, 0.80, 0.50),
-            Biome::Rainforest => Color::srgb(0.16, 0.50, 0.22),
-            Biome::Grassland => Color::srgb(0.72, 0.78, 0.60),
+            Biome::Rainforest => Color::srgb(0.0706, 0.2157, 0.1490),
+            Biome::Grassland => Color::srgb(0.086, 0.722, 0.353),
+        }
+    }
+
+    fn plant_density(self) -> f32 {
+        match self {
+            Biome::Rainforest => 0.30,
+            Biome::Grassland => 0.12,
+            Biome::Desert => 0.01,
+            Biome::Snowy => 0.005,
+        }
+    }
+
+    pub fn decay_multiplier(self) -> f32 {
+        match self {
+            Biome::Rainforest => 1.5,
+            Biome::Grassland => 1.0,
+            Biome::Desert => 2.0,
+            Biome::Snowy => 0.5,
         }
     }
 }
@@ -78,7 +103,7 @@ pub struct WorldGrid {
 
 impl WorldGrid {
     pub fn get(&self, p: IVec2) -> Option<&Tile> {
-        if p.x < 0 || p.y < 0 || p.x >= GRID_SIZE || p.y >= GRID_SIZE {
+        if p.cmplt(IVec2::ZERO).any() || p.cmpge(IVec2::splat(GRID_SIZE)).any() {
             return None;
         }
         self.tiles.get((p.y * GRID_SIZE + p.x) as usize)
@@ -99,14 +124,11 @@ fn normalize(v: f64) -> f32 {
 }
 
 fn classify(temperature: f32, humidity: f32) -> Biome {
-    if temperature < COLD_BELOW {
-        Biome::Snowy
-    } else if temperature > HOT_ABOVE && humidity < DRY_BELOW {
-        Biome::Desert
-    } else if temperature > HOT_ABOVE && humidity > WET_ABOVE {
-        Biome::Rainforest
-    } else {
-        Biome::Grassland
+    match (temperature, humidity) {
+        (t, _) if t < COLD_BELOW => Biome::Snowy,
+        (t, h) if t > HOT_ABOVE && h < DRY_BELOW => Biome::Desert,
+        (t, h) if t > HOT_ABOVE && h > WET_ABOVE => Biome::Rainforest,
+        _ => Biome::Grassland,
     }
 }
 
@@ -163,7 +185,10 @@ fn find_regions(tiles: &[Tile]) -> Vec<Region> {
             continue;
         }
         let biome = tiles[start].biome;
-        let mut region = Region { tiles: vec![start], border: [0; 4] };
+        let mut region = Region {
+            tiles: vec![start],
+            border: [0; 4],
+        };
         visited[start] = true;
 
         let mut i = 0;
@@ -238,7 +263,8 @@ fn spawn_world(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    let grid = generate(SEED);
+    let seed: u32 = rand::random();
+    let grid = generate(seed);
 
     // One shared mesh for every tile.
     let square = meshes.add(Rectangle::new(TILE_SZ, TILE_SZ));
@@ -269,6 +295,47 @@ fn spawn_world(
     commands.insert_resource(grid);
 }
 
+fn spawn_plants(
+    mut commands: Commands,
+    world: Res<WorldGrid>,
+    mut tick: Local<u32>,
+    params: Res<SimParams>,
+) {
+    let should_spawn = *tick % params.plant_regrow_tick == 0;
+    *tick += 1;
+    if !should_spawn {
+        return;
+    }
+    *tick = 1;
+
+    let mut rng = rand::rng();
+
+    for y in 0..GRID_SIZE {
+        for x in 0..GRID_SIZE {
+            let cell = IVec2::new(x, y);
+
+            let Some(biome) = world.biome_at(cell) else {
+                continue;
+            };
+
+            // Roll the dice for this tile.
+            if rng.random::<f32>() >= biome.plant_density() {
+                continue;
+            }
+
+            let quality = rng.random_range(0.5..1.0);
+            let freshness = rng.random_range(-0.5..1.0);
+            let freshness = UnitInterval::new_clamped(freshness);
+            commands.spawn(bundle(
+                grid_to_world(cell),
+                FoodKind::Plant,
+                quality,
+                freshness,
+            ));
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
@@ -277,6 +344,105 @@ pub struct WorldGenPlugin;
 
 impl Plugin for WorldGenPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_world);
+        app.add_systems(Startup, spawn_world)
+            .add_systems(PostStartup, spawn_plants)
+            .add_systems(FixedUpdate, spawn_plants);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn grassland() -> WorldGrid {
+        WorldGrid {
+            tiles: vec![
+                Tile {
+                    temperature: 0.5,
+                    humidity: 0.5,
+                    biome: Biome::Grassland
+                };
+                (GRID_SIZE * GRID_SIZE) as usize
+            ],
+        }
+    }
+
+    #[test]
+    fn grid_lookup_rejects_out_of_bounds_coordinates_instead_of_aliasing_other_rows() {
+        let grid = grassland();
+        assert!(grid.get(IVec2::ZERO).is_some());
+        assert!(grid.get(IVec2::splat(GRID_SIZE - 1)).is_some());
+        for cell in [
+            IVec2::new(GRID_SIZE, 0),
+            IVec2::new(-1, 1),
+            IVec2::new(0, -1),
+            IVec2::new(0, GRID_SIZE),
+        ] {
+            assert!(grid.get(cell).is_none());
+        }
+    }
+
+    #[test]
+    fn fixed_simulation_decomposes_food_before_creatures_choose_and_eat_it() {
+        use crate::creature::{Creature, CreaturePlugin, Genes, GridPos, Stats, WorldPos};
+        use crate::food::{Food, FoodPlugin};
+        use crate::ranged::SignedUnitInterval;
+        use crate::sim::SimParams;
+        use std::time::Duration;
+
+        let mut app = App::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(Duration::from_secs_f32(1.0 / 64.0));
+        app.insert_resource(time)
+            .insert_resource(grassland())
+            .insert_resource(SimParams {
+                initial_creature_count: 1,
+                initial_energy_range: 100.0..=100.0,
+                base_cost: 0.0,
+                food_decay_rate: 0.0,
+                ..default()
+            })
+            .add_plugins((CreaturePlugin, FoodPlugin));
+        app.update();
+
+        let pos = grid_to_world(IVec2::ZERO);
+        for (mut grid, mut world_pos, mut genes) in app
+            .world_mut()
+            .query_filtered::<(&mut GridPos, &mut WorldPos, &mut Genes), With<Creature>>()
+            .iter_mut(app.world_mut())
+        {
+            grid.0 = IVec2::ZERO;
+            world_pos.0 = pos;
+            genes.diet = SignedUnitInterval::try_new(0.0).unwrap();
+        }
+        app.world_mut().spawn(bundle(
+            pos,
+            FoodKind::Carcass,
+            1.0,
+            UnitInterval::try_new(0.0).unwrap(),
+        ));
+        app.world_mut().spawn(bundle(
+            pos,
+            FoodKind::Plant,
+            1.0,
+            UnitInterval::try_new(1.0).unwrap(),
+        ));
+        app.world_mut().run_schedule(FixedUpdate);
+
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<&Stats, With<Creature>>()
+                .single(app.world())
+                .unwrap()
+                .energy,
+            102.0
+        );
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Food>>()
+                .iter(app.world())
+                .count(),
+            0
+        );
     }
 }

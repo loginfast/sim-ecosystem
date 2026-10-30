@@ -1,6 +1,10 @@
 use bevy::prelude::*;
 
-use crate::creature::WorldPos;
+use crate::creature::{CreatureSimulation, WorldPos};
+use crate::ranged::UnitInterval;
+use crate::sim::SimParams;
+use crate::world_to_grid;
+use crate::worldgen::WorldGrid;
 
 #[derive(Clone, Copy)]
 pub enum FoodKind {
@@ -17,38 +21,134 @@ impl FoodKind {
     }
 }
 
+pub struct FoodPlugin;
+
+impl Plugin for FoodPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            FixedUpdate,
+            (decay, decompose).chain().before(CreatureSimulation),
+        );
+    }
+}
+
 #[derive(Component)]
-pub struct Food {
+pub struct FoodDetails {
     /* FIXME: better name perhaps? The energy gained from consuming a
     particular food item depends on the amount of food (quality) and the
     digestive efficiency of that creature at consuming the food's kind */
     pub quality: f32,
 
-    /* TODO: decay */
-    /* TODO: an explicit range from [-1, 1] for freshness as a newtype,
-     * the nutype crate seems interesting for this */
-    pub freshness: f32,
+    /* TODO: visualize freshness, lerp towards gray, ie.: -1 freshness (stale) is gray */
+    pub freshness: UnitInterval,
     pub kind: FoodKind,
 }
 
-impl Food {
-    pub fn new(kind: FoodKind, quality: f32) -> Self {
-        Self {
-            kind,
-            quality,
-            freshness: 1.0,
+#[derive(Component)]
+pub struct Food;
+
+fn decay(
+    time: Res<Time>,
+    params: Res<SimParams>,
+    world: Res<WorldGrid>,
+    mut q: Query<(&mut FoodDetails, &WorldPos), With<Food>>,
+) {
+    for (mut details, pos) in &mut q {
+        let cell = world_to_grid(pos.0);
+        let biome_multiplier = world.biome_at(cell).map_or(1.0, |b| b.decay_multiplier());
+
+        let mut f = details.freshness.into_inner() as f32;
+        f -= params.food_decay_rate * time.delta_secs() * biome_multiplier * 0.2;
+        details.freshness = UnitInterval::new_clamped(f.into());
+    }
+}
+
+fn decompose(mut commands: Commands, q: Query<(Entity, &FoodDetails), With<Food>>) {
+    for (entity, details) in &q {
+        if details.freshness.into_inner() <= 0.0 {
+            commands.entity(entity).despawn();
         }
     }
+}
 
-    pub fn bundle(pos: Vec2, kind: FoodKind, quality: f32) -> impl Bundle {
-        /* TODO: food size proportional to quality */
-        let sz = 8.0;
+pub fn bundle(pos: Vec2, kind: FoodKind, quality: f32, freshness: UnitInterval) -> impl Bundle {
+    /* TODO: food size proportional to quality */
+    let sz = 8.0;
 
-        (
-            Food::new(kind, quality),
-            WorldPos(pos),
-            Transform::default(),
-            Sprite::from_color(kind.color(), Vec2::new(sz, sz / 2.0)),
-        )
+    let details = FoodDetails {
+        kind,
+        quality,
+        freshness,
+    };
+
+    (
+        Food,
+        details,
+        WorldPos(pos),
+        Transform::from_translation(pos.extend(0.25)),
+        Sprite::from_color(kind.color(), Vec2::new(sz, sz / 2.0)),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grid_to_world;
+
+    #[test]
+    fn decomposition_removes_expired_plants() {
+        let mut app = App::new();
+        app.add_systems(Update, decompose);
+        let plant = app
+            .world_mut()
+            .spawn(bundle(
+                grid_to_world(IVec2::ZERO),
+                FoodKind::Plant,
+                1.0,
+                UnitInterval::try_new(0.0).unwrap(),
+            ))
+            .id();
+        app.update();
+
+        assert!(app.world().get_entity(plant).is_err());
+        let mut query = app
+            .world_mut()
+            .query_filtered::<(&WorldPos, &FoodDetails), With<Food>>();
+        assert_eq!(query.iter(app.world()).count(), 0);
+    }
+
+    #[test]
+    fn decomposition_removes_carcasses_without_growing_plants_and_leaves_fresh_food_alone() {
+        let mut app = App::new();
+        app.add_systems(Update, decompose);
+        let carcass = app
+            .world_mut()
+            .spawn(bundle(
+                Vec2::ZERO,
+                FoodKind::Carcass,
+                1.0,
+                UnitInterval::try_new(0.0).unwrap(),
+            ))
+            .id();
+        let plant = app
+            .world_mut()
+            .spawn(bundle(
+                Vec2::ZERO,
+                FoodKind::Plant,
+                1.0,
+                UnitInterval::try_new(1.0).unwrap(),
+            ))
+            .id();
+        app.update();
+
+        assert!(app.world().get_entity(carcass).is_err());
+        assert!(app.world().get_entity(plant).is_ok());
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Food>>()
+                .iter(app.world())
+                .count(),
+            1
+        );
     }
 }

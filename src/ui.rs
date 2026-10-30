@@ -33,21 +33,17 @@ fn inspector(
         ui.separator();
         ui.heading("Genes");
         ui.add(egui::Slider::new(&mut genes.speed, 0.5..=8.0).text("speed (tiles/s)"));
+        ui.add(egui::Slider::new(&mut genes.size, 0.0..=1.0).text("size (fraction of tile_size)"));
         ui.separator();
         ui.heading("State (energy)");
-        let frac = (stats.energy / params.energy_max).clamp(0.0, 1.0);
-        ui.add(
-            egui::ProgressBar::new(frac)
-                .text(format!("{:.1} / {:.0}", stats.energy, params.energy_max)),
-        );
+        let frac = (stats.energy / 100.0).clamp(0.0, 1.0);
+        ui.add(egui::ProgressBar::new(frac).text(format!("{:.1} / {:.0}", stats.energy, 100.0)));
     });
 }
 
 fn params_panel(mut contexts: EguiContexts, mut params: ResMut<SimParams>) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     egui::Window::new("Sim params").show(ctx, |ui| {
-        ui.add(egui::Slider::new(&mut params.energy_max, 10.0..=500.0).text("energy max"));
-        ui.add(egui::Slider::new(&mut params.base_cost, 0.0..=5.0).text("base cost"));
-        ui.add(egui::Slider::new(&mut params.movement_cost, 0.0..=0.5).text("move cost"));
+        ui.add(egui::Slider::new(&mut params.base_cost, 1.0..=20.0).text("base cost"));
     });
 }
